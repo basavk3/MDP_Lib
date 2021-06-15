@@ -1,0 +1,335 @@
+// Databricks notebook source
+// MAGIC %run /MDP/000_Master
+
+// COMMAND ----------
+
+val stageInProcess = "BaseToAtomic"
+val sourceTable = "CMC_MEME_MEMBER"
+val sourceTableSBSB = "CMC_SBSB_SUBSC"
+val sourceTableGRGR = "CMC_GRGR_GROUP"
+val atomicAnchorTable = "Pln_Mbr"
+val targetTable = "Pln_Mbr_Dtl"
+val sourceSystem = "Facets"
+val srcStmAtomicPath = atomicMountPointPath + "Src_Stm"
+val facetsBasePointPath = baseMountPointPath + sourceSystem + "/"
+val sourcePath = facetsBasePointPath + sourceTable
+val sourcePathSBSB = facetsBasePointPath + sourceTableSBSB
+val sourcePathGRGR = facetsBasePointPath + sourceTableGRGR
+val atomicAnchorPath = atomicMountPointPath + atomicAnchorTable
+val targetPath = atomicMountPointPath + targetTable
+
+// COMMAND ----------
+
+val schema = StructType(
+  StructField("Pln_Mbr_Sk",LongType,false) ::
+StructField("Vld_Fm_Ts",TimestampType,false) ::
+StructField("Vld_To_Ts",TimestampType,true) ::
+StructField("Eff_Fm_Dt",TimestampType,false) ::
+StructField("Eff_To_Dt",TimestampType,true) ::
+StructField("Tenant_Sk",LongType,false) ::
+StructField("Load_Info_Sk",LongType,false) ::
+StructField("Src_Cd_Sk",LongType,false) ::
+StructField("Mcare_HI_Card_Num",StringType,true) ::
+StructField("Hcare_Insrr_Ptnt_Mbr_Num",StringType,true) ::
+StructField("Mcare_Sts_Cd_Sk",LongType,true) ::
+StructField("Orig_Entl_Rsn_Cd_Sk",LongType,true) ::
+StructField("Crn_Entl_Rsn_Cd_Sk",LongType,true) ::
+StructField("ESRD_Ind",IntegerType,true) ::
+StructField("Frd_And_Abuse_Ind",StringType,true) ::
+StructField("Mbr_Card_ID_Num",StringType,true) ::
+StructField("Mbr_Card_Grp_Num",StringType,true) ::
+StructField("Pln_Mbr_Id",StringType,true) ::
+StructField("Mcaid_HI_Card_Num",StringType,true) ::
+StructField("Soc_Scr_Num",StringType,true) ::
+StructField("Pfx_Nm",StringType,true) ::
+StructField("Dgr_Nm",StringType,true) ::
+StructField("Mbr_Frst_Nm",StringType,true) ::
+StructField("Mbr_Mid_Nm",StringType,true) ::
+StructField("Mbr_Last_Nm",StringType,true) ::
+StructField("Mbr_Sufx_Nm",StringType,true) ::
+StructField("Mbr_Full_Nm",StringType,true) ::
+StructField("Sbscr_Ind",StringType,true) ::
+StructField("Sbscr_Num",IntegerType,true) ::
+StructField("Mbr_Sufx_Num",IntegerType,true) ::
+StructField("Gnd_Cd_Sk",LongType,true) ::
+StructField("Brth_Dt",TimestampType,true) ::
+StructField("Lng_Cd_Sk",LongType,true) ::
+StructField("Pln_Mbr_Sts_Cd_Sk",LongType,true) ::
+StructField("Mar_Sts_Cd_Sk",LongType,true) ::
+StructField("Elig_Dt",TimestampType,true) ::
+StructField("Qual_Evnt_Dt",TimestampType,true) ::
+StructField("New_Sgn_Dt",TimestampType,true) ::
+StructField("Prior_Bill_Ind",IntegerType,true) ::
+StructField("Prior_Bill_Eff_Dt",TimestampType,true) ::
+StructField("Wrk_Ph_Num",StringType,false) ::
+StructField("Wrk_Ph_Exn_Num",StringType,true) ::
+StructField("Cell_Ph_Num",StringType,true) ::
+StructField("Sbscr_Frst_Nm",StringType,true) ::
+StructField("Sbscr_Last_Nm",StringType,true) ::
+StructField("Sbscr_Mid_Nm",StringType,true) ::
+StructField("Sbscr_Sufx_Nm",StringType,true) ::
+StructField("Sbscr_Orig_Eff_Dt",TimestampType,true) ::
+StructField("VIP_Cd_Sk",LongType,true) ::
+StructField("Pcs_Sts_Rsn_Cd_Sk",LongType,true) ::
+StructField("Empe_Num",StringType,true) ::
+StructField("Fam_Cd_Sk",LongType,true) ::
+StructField("Emp_Strt_Dt",TimestampType,true) ::
+StructField("Emp_End_Dt",TimestampType,true) ::
+StructField("Sbscr_Clm_Pymt_Mth_Cd_Sk",LongType,true) ::
+StructField("Sgn_Dt",TimestampType,true) ::
+StructField("FSA_Clm_Pymt_Mth_Cd_Sk",LongType,true) ::
+StructField("MLR_Elc_Fnd_Tfr_Ind",IntegerType,true) ::
+StructField("Sbscr_Sts_Cd_Sk",LongType,true) ::
+StructField("Rcvd_Dt",TimestampType,true) ::
+StructField("Mbr_Hlt_Id",StringType,true) ::
+StructField("Mbr_Rcrd_Num",IntegerType,true) ::
+StructField("Sbscr_Id",StringType,true) ::Nil) 
+
+ val dfDeltaRead = if(DeltaTable.isDeltaTable(spark, targetPath))
+                                           {spark.read.format("delta").load(targetPath)}
+                                     else{spark.createDataFrame(spark.sparkContext.emptyRDD[Row], schema)}
+
+if(!(DeltaTable.isDeltaTable(spark, targetPath))){dfDeltaRead.write.format("delta").mode("append").save(targetPath)}
+
+
+// COMMAND ----------
+
+val dfBaseRead = spark.read.format("delta").load(sourcePath)
+
+val dfReadSrcStm = spark.read.format("delta").load(srcStmAtomicPath)
+
+val dfReadSBSB = spark.read.format("delta").load(sourcePathSBSB)
+
+val dfReadGRGR = spark.read.format("delta").load(sourcePathGRGR)
+
+val dfAnchorRead = spark.read.format("delta").load(atomicAnchorPath)
+
+// COMMAND ----------
+
+val dfFilterRecords = dfBaseRead
+                        .withColumn("Pln_Mbr_Bk", concat_ws("|",lit("Related Member"),$"SBSB_CK", $"MEME_SFX"))
+                        .join(dfAnchorRead, Seq("Pln_Mbr_Bk"), "inner")
+                        .withColumn("Src_Cd_Bk",lit(sourceSystem))
+                        .join(dfReadSrcStm, Seq("Src_Cd_Bk","Tenant_Sk"))
+                        .drop(dfAnchorRead("Load_Info_Sk"))
+                        .drop(dfAnchorRead("Type_Cd_Sk"))
+
+// COMMAND ----------
+
+val dfIdentifyNewRecordsJoined = getLoadInfoAuditDelta(dfFilterRecords,
+                                                  "file",
+                                                   Map(
+                                                     "StageInProcess"    -> stageInProcess ,
+                                                     "ParentSubjectArea" -> "Member",
+                                                     "SubjectArea"       -> "Member",
+                                                     "SourceFileName"    -> sourceTable,
+                                                     "TargetFileName"    -> targetTable
+                                                   ))
+
+// COMMAND ----------
+
+val dfLoadInfoSkSource = dfIdentifyNewRecordsJoined
+                                  .groupBy("FileName","FileDate")
+                                  .agg(count("*").cast("Integer").as("SourceRecordCount"),
+                                       min($"dTransaction").as("DataStartDateTime"),
+                                       max($"dTransaction").as("DataEndDateTime"))
+
+// COMMAND ----------
+
+val dfLoadInfoSkReturned = generateSk(dfLoadInfoSkSource,loadInfoAudtPath,"Load_Info_Sk")
+
+// COMMAND ----------
+
+val dfBaseAndLoadInfo = dfIdentifyNewRecordsJoined
+                        .join(dfLoadInfoSkReturned, Seq("FileName","FileDate"),"inner")
+
+// COMMAND ----------
+
+val commonCodeCall =  (dfBaseAndLoadInfo
+                              .select(
+                                  lit("MEME_SEX").as("SourceColumnName"),
+                                  $"MEME_SEX".as("Cmn_Cd"),
+                                  lit("Gender Code").as("Dmn_Nm"),
+                                  $"Tenant_Sk",
+                                  $"Load_Info_Sk",
+                                  $"Src_Cd_Sk").distinct
+                    .union(dfBaseAndLoadInfo
+                              .select(
+                                  lit("MEME_MCTR_LANG").as("SourceColumnName"),
+                                  $"MEME_MCTR_LANG",
+                                  lit("Language Code"),
+                                  $"Tenant_Sk",
+                                  $"Load_Info_Sk",
+                                  $"Src_Cd_Sk").distinct)
+                     .union(dfBaseAndLoadInfo
+                              .select(
+                                  lit("MEME_MCTR_STS").as("SourceColumnName"),
+                                  $"MEME_MCTR_STS",
+                                  lit("Plan Member Status Code"),
+                                  $"Tenant_Sk",
+                                  $"Load_Info_Sk",
+                                  $"Src_Cd_Sk").distinct)
+                     .union(dfBaseAndLoadInfo
+                              .select(
+                                  lit("MEME_MARITAL_STATUS").as("SourceColumnName"),
+                                  $"MEME_MARITAL_STATUS",
+                                  lit("Marital Status Code"),
+                                  $"Tenant_Sk",
+                                  $"Load_Info_Sk",
+                                  $"Src_Cd_Sk").distinct)
+                      .union(dfBaseAndLoadInfo
+                              .select(
+                                  lit("MEME_FAM_LINK_ID").as("SourceColumnName"),
+                                  $"MEME_FAM_LINK_ID",
+                                  lit("Family Code"),
+                                  $"Tenant_Sk",
+                                  $"Load_Info_Sk",
+                                  $"Src_Cd_Sk").distinct))
+                          .groupBy($"SourceColumnName",$"Cmn_Cd",$"Dmn_Nm",$"Tenant_Sk",$"Src_Cd_Sk").agg(max($"Load_Info_Sk").as("Load_Info_Sk"))
+
+// COMMAND ----------
+
+val dfReturnCommonCodeSk = getCmnCdSk(commonCodeCall)
+
+// COMMAND ----------
+
+val dfSourceDataWithCommonCode = dfBaseAndLoadInfo.as("dfBaseAndLoadInfo")
+                                                .join(dfReturnCommonCodeSk.as("dfReturnCommonCodeSk_Marital"), 
+                                                        $"dfReturnCommonCodeSk_Marital.Cmn_Cd" === $"dfBaseAndLoadInfo.MEME_MARITAL_STATUS")
+                                                .where($"dfReturnCommonCodeSk_Marital.SourceColumnName" === lit("MEME_MARITAL_STATUS"))
+                                                .join(dfReturnCommonCodeSk.as("dfReturnCommonCodeSk_Fam"), 
+                                                        $"dfReturnCommonCodeSk_Fam.Cmn_Cd" === $"dfBaseAndLoadInfo.MEME_FAM_LINK_ID")
+                                                .where($"dfReturnCommonCodeSk_Fam.SourceColumnName" === lit("MEME_FAM_LINK_ID"))
+                                                .join(dfReturnCommonCodeSk.as("dfReturnCommonCodeSk_Lang"), 
+                                                        $"dfReturnCommonCodeSk_Lang.Cmn_Cd" === $"dfBaseAndLoadInfo.MEME_MCTR_LANG")
+                                                .where($"dfReturnCommonCodeSk_Lang.SourceColumnName" === lit("MEME_MCTR_LANG"))
+                                                .join(dfReturnCommonCodeSk.as("dfReturnCommonCodeSk_Sts"), 
+                                                        $"dfReturnCommonCodeSk_Sts.Cmn_Cd" === $"dfBaseAndLoadInfo.MEME_MCTR_STS")
+                                                .where($"dfReturnCommonCodeSk_Sts.SourceColumnName" === lit("MEME_MCTR_STS"))
+                                                .join(dfReturnCommonCodeSk.as("dfReturnCommonCodeSk_Sex"), 
+                                                        $"dfReturnCommonCodeSk_Sex.Cmn_Cd" === $"dfBaseAndLoadInfo.MEME_SEX")
+                                                .where($"dfReturnCommonCodeSk_Sex.SourceColumnName" === lit("MEME_SEX"))
+                              .select(dfBaseAndLoadInfo("*"),
+                                      $"dfReturnCommonCodeSk_Marital.Src_Cd_Sk".as("Mar_Sts_Cd_Sk"),
+                                      $"dfReturnCommonCodeSk_Fam.Src_Cd_Sk".as("Fam_Cd_Sk"),
+                                      $"dfReturnCommonCodeSk_Lang.Src_Cd_Sk".as("Lng_Cd_Sk"),
+                                      $"dfReturnCommonCodeSk_Sts.Src_Cd_Sk".as("Pln_Mbr_Sts_Cd_Sk"),
+                                      $"dfReturnCommonCodeSk_Sex.Src_Cd_Sk".as("Gnd_Cd_Sk"))
+
+// COMMAND ----------
+
+val dfFinal = dfSourceDataWithCommonCode.as("dfSourceDataWithCommonCode")
+.join(dfReadSBSB.as("dfReadSBSB"), $"dfSourceDataWithCommonCode.SBSB_CK" === $"dfReadSBSB.SBSB_CK","inner")
+.join(dfReadGRGR.as("dfReadGRGR"), $"dfSourceDataWithCommonCode.GRGR_CK" === $"dfReadGRGR.GRGR_CK","inner")
+  .withColumn("Sbscr_Ind",when($"dfSourceDataWithCommonCode.MEME_SFX" === lit("00"),"Y").otherwise("N"))
+.select($"dfSourceDataWithCommonCode.Pln_Mbr_Sk",
+          $"dfSourceDataWithCommonCode.Vld_Fm_Ts",
+          $"dfSourceDataWithCommonCode.Vld_To_Ts",
+          $"dfSourceDataWithCommonCode.Eff_Fm_Dt",
+          $"dfSourceDataWithCommonCode.Eff_To_Dt",
+          $"dfSourceDataWithCommonCode.Tenant_Sk",
+          $"dfSourceDataWithCommonCode.Load_Info_Sk",
+          $"dfSourceDataWithCommonCode.Src_Cd_Sk",
+          $"dfSourceDataWithCommonCode.MEME_HICN".as("Mcare_HI_Card_Num"),
+          lit("").as("Hcare_Insrr_Ptnt_Mbr_Num"),
+          lit(0).cast("Long").as("Mcare_Sts_Cd_Sk"),
+          lit(0).cast("Long").as("Orig_Entl_Rsn_Cd_Sk"),
+          lit(0).cast("Long").as("Crn_Entl_Rsn_Cd_Sk"),
+          lit(0).as("ESRD_Ind"),
+          lit("").as("Frd_And_Abuse_Ind"),
+          $"dfSourceDataWithCommonCode.MEME_HEALTH_ID".as("Mbr_Card_ID_Num"),
+          $"dfReadGRGR.GRGR_ID".as("Mbr_Card_Grp_Num"),
+          $"dfSourceDataWithCommonCode.SBSB_CK".cast("String").as("Pln_Mbr_Id"),
+          $"dfSourceDataWithCommonCode.MEME_MEDCD_NO".as("Mcaid_HI_Card_Num"),
+          $"dfSourceDataWithCommonCode.MEME_SSN".as("Soc_Scr_Num"),
+          lit("").as("Pfx_Nm"),
+          lit("").as("Dgr_Nm"),
+          $"dfSourceDataWithCommonCode.MEME_FIRST_NAME".as("Mbr_Frst_Nm"),
+          $"dfSourceDataWithCommonCode.MEME_MID_INIT".as("Mbr_Mid_Nm"),
+          $"dfSourceDataWithCommonCode.MEME_LAST_NAME".as("Mbr_Last_Nm"),
+          $"dfSourceDataWithCommonCode.MEME_TITLE".as("Mbr_Sufx_Nm"),
+          lit("").as("Mbr_Full_Nm"),
+          col("Sbscr_Ind"),
+          $"dfReadSBSB.SBSB_ID".cast("integer").as("Sbscr_Num"),
+          $"dfSourceDataWithCommonCode.MEME_SFX".as("Mbr_Sufx_Num"),
+          $"dfSourceDataWithCommonCode.Gnd_Cd_Sk",
+          $"dfSourceDataWithCommonCode.MEME_BIRTH_DT".as("Brth_Dt"),
+          $"dfSourceDataWithCommonCode.Lng_Cd_Sk",
+          $"dfSourceDataWithCommonCode.Pln_Mbr_Sts_Cd_Sk",
+          $"dfSourceDataWithCommonCode.Mar_Sts_Cd_Sk",
+          $"dfSourceDataWithCommonCode.MEME_ELIG_DT".as("Elig_Dt"),
+          $"dfSourceDataWithCommonCode.MEME_QUALIFY_DT".as("Qual_Evnt_Dt"),
+          $"dfSourceDataWithCommonCode.MEME_NEW_SIG_DT".as("New_Sgn_Dt"),
+          $"dfSourceDataWithCommonCode.MEME_PRBL_IND".cast("Integer").as("Prior_Bill_Ind"),
+          $"dfSourceDataWithCommonCode.MEME_PRBL_EFF_DT".as("Prior_Bill_Eff_Dt"),
+          lit("").as("Wrk_Ph_Num"),
+          lit("").as("Wrk_Ph_Exn_Num"),
+          lit("").as("Cell_Ph_Num"),
+          lit("").as("Sbscr_Frst_Nm"),
+          lit("").as("Sbscr_Last_Nm"),
+          lit("").as("Sbscr_Mid_Nm"),
+          lit("").as("Sbscr_Sufx_Nm"),
+          lit("9999-12-31T23:59:59.999+0000").cast("timestamp").as("Sbscr_Orig_Eff_Dt"),
+          lit(0).cast("Long").as("VIP_Cd_Sk"),
+          lit(0).cast("Long").as("Pcs_Sts_Rsn_Cd_Sk"),
+          lit("").as("Empe_Num"),
+          $"dfSourceDataWithCommonCode.Fam_Cd_Sk",
+          lit("9999-12-31T23:59:59.999+0000").cast("timestamp").as("Emp_Strt_Dt"),
+          lit("9999-12-31T23:59:59.999+0000").cast("timestamp").as("Emp_End_Dt"),
+          lit(0).cast("Long").as("Sbscr_Clm_Pymt_Mth_Cd_Sk"),
+          lit("9999-12-31T23:59:59.999+0000").cast("timestamp").as("Sgn_Dt"),
+          lit(0).cast("Long").as("FSA_Clm_Pymt_Mth_Cd_Sk"),
+          lit(0).as("MLR_Elc_Fnd_Tfr_Ind"),
+          lit(0).cast("Long").as("Sbscr_Sts_Cd_Sk"),
+          lit("9999-12-31T23:59:59.999+0000").cast("timestamp").as("Rcvd_Dt"),
+          $"dfSourceDataWithCommonCode.MEME_RECORD_NO".cast("integer").as("Mbr_Rcrd_Num"),
+          $"dfSourceDataWithCommonCode.MEME_HEALTH_ID".as("Mbr_Hlt_Id"),
+          lit("").as("Sbscr_id"),
+          $"dfSourceDataWithCommonCode.dTransaction",
+          $"dfSourceDataWithCommonCode.iAuditDBRowID",
+          $"dfSourceDataWithCommonCode.StageInProcess",
+          $"dfSourceDataWithCommonCode.ParentSubjectArea",
+          $"dfSourceDataWithCommonCode.SubjectArea",
+          concat(lit(sourcePath),$"dfSourceDataWithCommonCode.FileName").as("SourcePath"),
+          $"dfSourceDataWithCommonCode.FileName".as("SourceFileName"),
+          lit(targetPath).as("TargetPath"),
+          $"dfSourceDataWithCommonCode.TargetFileName",
+          $"dfSourceDataWithCommonCode.FileName",
+          $"dfSourceDataWithCommonCode.FileDate",
+          $"dfSourceDataWithCommonCode.DataStartDateTime", 
+          $"dfSourceDataWithCommonCode.DataEndDateTime",
+          $"dfSourceDataWithCommonCode.SourceRecordCount")
+  .na.fill(0).distinct()
+
+// COMMAND ----------
+
+// This Seq of columns which is used as business key ; like any surrogate key.
+val businessKeyColumnSeq =Seq("Pln_Mbr_Sk")
+//This is to ensure multiple instance of same SK is loaded based on orderby clause set by Modeler. For multiple partitionBy, use like partitionBy('col1,'col2) and orderBy('col1 desc,'col2 asc)
+val windowPartitionAndOrderByColumns = Window.partitionBy('Pln_Mbr_Sk).orderBy('dTransaction desc, 'iAuditDBRowID desc)
+
+// COMMAND ----------
+
+val rollbackVersion = getDeltaTableCurrentVersion(spark,targetPath)
+try
+         {
+           
+           //Write to the target table ; next read from target table and prepare data for etlmetadata table 
+             deltaHashAndMerge(businessKeyColumnSeq,windowPartitionAndOrderByColumns,dfFinal,targetPath)
+             
+           //createLoadInfoAudt - runs above function to generate the Load_Info_Audt insert dataframe
+           //writeLoadInfoAudt - actually writes to loadInfoAudtPath which is String = /mnt/integration/atomic/Load_Info_Audt
+             writeLoadInfoAudt(createLoadInfoAudt(dfFinal,targetPath))
+         }
+       catch
+         {
+            
+            case e: Exception => 
+                    {
+                      // Rollback the cleansed Layer Delta Table
+                      
+                      rollBackDeltaTable(spark, targetPath, rollbackVersion)
+                      
+                      throw new Exception("Error while writing to the Base Layer, Rolled back " + targetPath, e)
+                    }
+          } 
