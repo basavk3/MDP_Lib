@@ -1,0 +1,277 @@
+// Databricks notebook source
+//This is a band aid until we upgrade to a new Scala version on the cluster - remove once upgrade is completed..
+spark.conf.set("spark.sql.crossJoin.enabled", "true") 
+
+// COMMAND ----------
+
+// MAGIC %run /MDP/000_Master
+
+// COMMAND ----------
+
+dbutils.widgets.text("input_path","NCPDP External Code List")
+dbutils.widgets.text("target_table","stg_ECL")
+dbutils.widgets.text("subject_area","NCPDPExternalCodeList_ECL")
+dbutils.widgets.text("parent_subject_area","Pharmacy")
+dbutils.widgets.text("incremental_key_fields","FileName,FileDate")
+dbutils.widgets.text("adf_pipeline","")
+dbutils.widgets.text("schedulerJobName","")
+
+val stageInProcess = "RawToBase"
+val rawInputPath=dbutils.widgets.get("input_path")
+val baseTargetDeltaTable=dbutils.widgets.get("target_table")
+val subjectArea =dbutils.widgets.get("subject_area")
+val parentSubjectArea =dbutils.widgets.get("parent_subject_area")
+val incrementalKeyFields =dbutils.widgets.get("incremental_key_fields")
+val adfPipeline =dbutils.widgets.get("adf_pipeline")
+val schedulerJobName =dbutils.widgets.get("schedulerJobName")
+
+val baseTargetFolder = pharmacyBaseMountPointPath
+val baseTargetFullPath = pharmacyBaseMountPointPath + baseTargetDeltaTable
+val rawMountPointPath= pharmacyRawMountPointPath + rawInputPath +"/"
+
+
+// COMMAND ----------
+
+//change the Target folder
+val delta_table = "stg_ECL"
+val output_path = pharmacyBaseMountPointPath + delta_table
+var file_name = "ECL" 
+val deltaLakeNCPDPExternalCodeList_ECL_Write = pharmacyBaseMountPointPath + delta_table
+
+
+// COMMAND ----------
+
+
+//created the schema
+
+val ECL_schema = StructType(
+  StructField("RecordType",StringType,true) ::
+  StructField("DataElementNumber",StringType,true) ::
+  StructField("CodeValue",StringType,true) ::
+  StructField("PartitionNumber",StringType,true) ::
+  StructField("Description",StringType,true) ::
+  StructField("FileName", StringType,true) ::
+  StructField("FileDate",TimestampType,true) ::
+  StructField("ETLMetadataSK",StringType,true) :: Nil)
+  
+    val dfstg_Base = if(DeltaTable.isDeltaTable(spark, baseTargetFullPath))
+                                               {spark.read.format("delta").load(baseTargetFullPath)}
+                                         else{spark.createDataFrame(spark.sparkContext.emptyRDD[Row], ECL_schema)}
+
+
+// COMMAND ----------
+
+if(!DeltaTable.isDeltaTable(spark, baseTargetFullPath)){dfstg_Base.write.format("delta").mode("append").save(baseTargetFullPath)}
+
+
+
+// COMMAND ----------
+
+//Extract dates from File Names to be stored in 'SourceFileDate' field
+
+
+val dfLoadSourceFiles = dbutils.fs.ls(rawMountPointPath).toDF
+                        .withColumn("FirstSplit",split($"name", "_"))
+                        .select($"path", $"name", $"size",split(col("FirstSplit").getItem(2), ".zip/").alias("FirstSplitDate"))
+                        .withColumn("SourceFileDate",concat(col("FirstSplitDate").getItem(0),lit("01")))
+                        .withColumn("FilePath",substring($"path",6,2500))
+                        .withColumn("FilePathfull",concat(col("FilePath"),substring($"name",0,39),lit("/ECL.TXT")))
+                        .select(col("FilePath"),col("FilePathfull"), $"name", $"size",$"SourceFileDate")
+                        .withColumn("SourceFileDateCast",to_timestamp($"SourceFileDate","yyyyMMdd"))
+
+
+           
+val dfETLMetadataTable = spark.read.format("delta").load(etlMetadataPath)
+
+
+// COMMAND ----------
+
+//This has to be included if we need some user defined fuction to be called from dataframe with column 
+val udfFunc = udf(FileToStageTable_Dictionary.get _)
+
+// COMMAND ----------
+
+var exists =0 //initial state = 0; this function will create the full dataframe with all folder and all files
+var dfLoadSourceFilesInit= spark.emptyDataFrame
+var dfLoadSourceFilesRepeat= spark.emptyDataFrame
+dfLoadSourceFiles.collect().foreach(row=>
+                                {
+                                  
+                                  if (exists==0)
+                                  {
+                                    dfLoadSourceFilesInit =dbutils.fs.ls(row.getAs("FilePathfull")).toDF
+                                                          .withColumn("FilePathfull",lit(row.getAs("FilePathfull")))
+                                                          .withColumn("SourceFilePath",regexp_replace(col("path"), "dbfs:", ""))
+                                                          .withColumn("SourceFileDate",lit(row.getAs("SourceFileDate")))
+                                                          .withColumn("TargetFileName", lit(baseTargetDeltaTable))
+                                                          .withColumn("TargetFilePath",lit(baseTargetFullPath))
+                                                           exists = 1
+                                  }
+                                  else                                   
+                                  {
+                                   dfLoadSourceFilesRepeat = dbutils.fs.ls(row.getAs("FilePathfull")).toDF                                   
+                                                            .withColumn("FilePathfull",lit(row.getAs("FilePathfull")))                                                          
+                                                            .withColumn("SourceFilePath",regexp_replace(col("path"), "dbfs:", ""))
+                                                            .withColumn("SourceFileDate",lit(row.getAs("SourceFileDate")))
+                                                            .withColumn("TargetFileName", lit(baseTargetDeltaTable))
+                                                            .withColumn("TargetFilePath",lit(baseTargetFullPath))
+                                    
+                                    dfLoadSourceFilesInit = dfLoadSourceFilesInit.union(dfLoadSourceFilesRepeat)                                    
+                                  }
+                                })
+
+
+// COMMAND ----------
+
+//Gather list of all new files that need to be loaded
+
+val dfstg_IdentifyNewFilesJoined = dfLoadSourceFiles.join(dfETLMetadataTable,dfETLMetadataTable("StageInProcess") === lit(stageInProcess) 
+                                                          && dfETLMetadataTable("ParentSubjectArea") === lit(parentSubjectArea) 
+                                                          && dfETLMetadataTable("SubjectArea") === lit(subjectArea) 
+                                                          && dfETLMetadataTable("SourceFileName") === dfLoadSourceFiles("name") 
+                                                       
+                                                          && dfETLMetadataTable("TargetFileName") ===  lit(delta_table)
+                                                       
+                                                          && dfETLMetadataTable("FileDate") <=> dfLoadSourceFiles("SourceFileDateCast"),"left")
+.select(dfLoadSourceFiles("*"))
+.where(dfETLMetadataTable("StageInProcess").isNull)
+
+// COMMAND ----------
+
+def columnDelimitedFile(location: String):DataFrame =
+{
+var retdf =                  sqlContext.read
+                                       .format("com.databricks.spark.csv")
+                                       .option("header", "false")
+                                       .option("delimiter", "|")
+                                       .option("timestampFormat", "yyyy/MM/dd HH:mm:ss") 
+                                       .option("mergeSchema", "false")
+                                       .schema(ECL_schema)
+                                       .load(location)
+ 
+  retdf
+}
+
+// COMMAND ----------
+
+// Creating ETL MetaData table data 
+def createETLMetaData(spark:org.apache.spark.sql.SparkSession, dataFrameSource: DataFrame): DataFrame =
+{
+ 
+var dfETLMetaData = dataFrameSource
+                      .withColumn("StageInProcess",lit(stageInProcess))
+                      .withColumn("ParentSubjectArea",lit(parentSubjectArea))
+                      .withColumn("SubjectArea",lit(subjectArea))
+                      .withColumn("SourcePath",dataFrameSource("SourcePath"))
+                      .withColumn("SourceFileName",dataFrameSource("SourceFileName"))
+                      .withColumn("TargetPath",dataFrameSource("TargetPath"))
+                      .withColumn("TargetFileName",dataFrameSource("TargetFileName"))  
+                      .withColumn("FileName",dataFrameSource("FileName"))                      
+                      .withColumn("FileDate",dataFrameSource("FileDate"))
+                      .withColumn("NotebookPath",lit(dbutils.notebook.getContext().notebookPath.get))
+                      .withColumn("ADFPipeline",lit(adfPipeline))
+                      .withColumn("SourceRecordCount",dataFrameSource("SourceRecordCount").cast("Integer"))
+                      .withColumn("TargetRecordCount",dataFrameSource("count").cast("Integer"))
+                      .withColumn("LoadStartDatetime",lit(LoadStartDatetime).cast("timestamp"))
+                      .withColumn("LoadEndDatetime",current_timestamp())
+                      .withColumn("IncrementalKeyFields", lit(incrementalKeyFields))
+                      .withColumn("SchedulerJobName",lit(schedulerJobName))
+                      .withColumn("ETLMetadataSK",dataFrameSource("ETLMetadataSK"))
+                      .select(col("StageInProcess"), col("ParentSubjectArea"), col("SubjectArea"),
+                              col("SourcePath"),
+                              col("SourceFileName"),
+                              col("TargetPath"),
+                              col("TargetFileName"), 
+                              col("FileName"),
+                              col("FileDate").cast("timestamp"),
+                              col("NotebookPath"), col("ADFPipeline"),
+                              dataFrameSource("DataStartDatetime"), dataFrameSource("DataEndDateTime"),
+                              col("SourceRecordCount"), col("TargetRecordCount"),
+                              col("LoadStartDatetime"), col("LoadEndDatetime"),
+                              col("IncrementalKeyFields"), col("SchedulerJobName"),
+                              col("ETLMetadataSK")
+                              )
+ return dfETLMetaData
+}
+
+// COMMAND ----------
+
+//loop through each of the new files identified
+
+var dfstg_BaseFullgroupBy = spark.emptyDataFrame
+var dfstg_ReadGroupBy     = spark.emptyDataFrame
+var dfstg_FileReadJoined  = spark.emptyDataFrame
+var dfETLMetaDataReturn   = spark.emptyDataFrame
+var dfPrepareMetadata     = spark.emptyDataFrame
+var dfAddedColumnsOnReturnFinal =spark.emptyDataFrame
+
+dfstg_IdentifyNewFilesJoined.collect().foreach(row=>
+                                      {
+    var inboundCSVFile = row.getAs("FilePathfull").toString()
+    var fileName = row.getAs("name").toString()
+    var fileDate = row.getAs("SourceFileDate").toString()
+    var targetTableName = baseTargetDeltaTable
+    var targetFullPath = baseTargetFullPath
+    var dfstg_FileReadRaw = columnDelimitedFile(row.getAs("FilePathfull"))
+    var dfstg_FileReadRaw_final = dfstg_FileReadRaw
+                                        .withColumn("FileName",lit(row.getAs("name")))
+                                         .withColumn("FileDate",add_months(to_date(lit(row.getAs("SourceFileDate")),"yyyyMMdd"),-0).cast("timestamp"))
+                                          .drop("ETLMetadataSK")
+                                    
+                                        
+    dfstg_ReadGroupBy = dfstg_FileReadRaw_final
+                      .groupBy("FileName","FileDate")
+                      .agg(count("*").cast("Integer").as("SourceRecordCount"),
+                        min(col("FileDate")).as("DataStartDateTime"),                                         
+                        max(last_day(col("FileDate")).cast("timestamp")).as("DataEndDateTime"))
+                       .withColumn("ETLMetadataSK",expr("uuid()"))
+                       .withColumn("FileDate",col("FileDate").cast("string"))                
+
+    //create final dataframe before loading to table
+    dfAddedColumnsOnReturnFinal =dfstg_FileReadRaw_final.join(dfstg_ReadGroupBy,dfstg_FileReadRaw_final("FileName")===dfstg_ReadGroupBy("FileName")
+                                                                                                        && dfstg_FileReadRaw_final("FileDate")===dfstg_ReadGroupBy("FileDate"))
+                                                                   .select (dfstg_FileReadRaw_final("*"),dfstg_ReadGroupBy("ETLMetadataSK"))  
+                                 
+  
+     val rollbackVersion = if (DeltaTable.isDeltaTable(spark, baseTargetFullPath)) 
+                                  {
+                                    String.valueOf(DeltaTable.forPath(spark,baseTargetFullPath).history(1).first.getAs[Long]("version"))
+                                  } else 
+                                        {
+                                    "0"
+                                        }
+   
+                                  try {
+                                    //Write to the target table ; next read from target table and prepare data for etlmetadata table 
+                                    //Read data again from destination table to capture counts for metadata 
+                      
+                     dfAddedColumnsOnReturnFinal.write.format("delta").mode("append").save(baseTargetFullPath)
+                     dfstg_BaseFullgroupBy = spark.read.format("delta").load(baseTargetFullPath).groupBy("FileName", "FileDate").count()
+                     dfPrepareMetadata = dfstg_ReadGroupBy
+                                    .join(dfstg_BaseFullgroupBy,
+                                                 dfstg_BaseFullgroupBy("FileName") === dfstg_ReadGroupBy("FileName") && 
+                                                 dfstg_BaseFullgroupBy("FileDate") === dfstg_ReadGroupBy("FileDate"),
+                                                 "left")
+                       
+                                    .withColumn("SourcePath",lit(row.getAs("FilePath")))
+                                    .withColumn("SourceFileName",lit(row.getAs("name")))
+                                    .withColumn("TargetPath",lit(targetTableName))
+                                    .withColumn("TargetFileName",lit(targetTableName))
+                                    .select(dfstg_ReadGroupBy("*"),col("SourcePath"),col("SourceFileName"),col("TargetPath"),col("TargetFileName"),
+                                                   dfstg_BaseFullgroupBy("count"))
+                                           
+        dfETLMetaDataReturn = createETLMetaData(spark, dfPrepareMetadata)
+        val dfETLMetaDataReturnNew = dfETLMetaDataReturn.withColumn("FileDate",col("FileDate").cast("string"))
+        jobHistoryForETLJOb(dfETLMetaDataReturnNew)                
+                               
+                                   } 
+                                   catch {
+                                    case e: Exception => 
+                                     {
+                                       // Rollback the cleansed Layer Delta Table                                                
+                                      rollBackDeltaTable(spark, baseTargetFullPath, rollbackVersion)
+                                      
+                                      throw new Exception("Error while writing to the Base Layer, Rolled back " + baseTargetFullPath, e)
+                                    }
+                                 }
+                                      })
