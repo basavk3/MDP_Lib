@@ -1,0 +1,1157 @@
+// Databricks notebook source
+import org.apache.spark.sql.Column
+import spark.sqlContext.implicits._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.types.{DateType,IntegerType,StringType, LongType, StructField, StructType}
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.sql.expressions.Window
+
+import org.apache.spark.sql.functions.row_number
+
+// Import Spark Connector and ADAL libararies
+import com.microsoft.azure.sqldb.spark.config.Config
+import com.microsoft.azure.sqldb.spark.connect._
+import com.microsoft.azure.sqldb.spark.query._
+import org.apache.spark.sql.DataFrame
+import com.microsoft.azure.sqldb.spark.bulkcopy.BulkCopyMetadata
+
+//import ADAL for Active Directory OAuth
+import com.microsoft.aad.adal4j.ClientCredential
+import com.microsoft.aad.adal4j.AuthenticationContext
+import java.util.concurrent.Executors
+import java.security.MessageDigest
+import java.nio.file.{Files, Paths}
+
+// COMMAND ----------
+
+//This generic function will aid in extracting data from fixed width files for different set of file layouts
+//Any given Pharmacy fix width file has header, footer and child records and they have different number of columns with different column sizes.
+
+//function below takes first argument as a List of type Int that consists of all column width sizes
+//function takes second argument of type string which is assumed to be the line read from the fixed width file
+//we are reading line by line because file consists of header, footer and child records.
+//Code will look at specific set of charecters at a given position that will tell us what type of record in the file we are dealing with
+//We will then parse that line/string accordingly
+
+// No hard coding should be done when doing future enhancements so we can use the generic function(s) for 
+// multiple types of fix width files
+// We should just describe the schema of the file and the list containing the size of each column 
+// and should be able to call the generic function(s) to extract data from all fix width files
+// as well as for future possible layout version changes from NCPDP.
+
+//TODO: As a first attempt, we are ignoring header and footer records and only parsing child records. 
+//      Further logic may be added if required to gracefully parse and process header and footer records
+//      we should define a seperate notebook with all constants where all file related schema should be maintained
+//      given file name, we should call .get for defined Map to lookup proper schema and pass it to the generic function
+
+def lsplit(pos: List[Int], str: String):  Row = {
+ 
+//How to call this function:
+//     Step1: create variable to hold width length
+//     val sizeOfColumn=List(4,4,5,4,10,8,2);
+//     val row=lsplit(sizeOfColumn, x.mkString) where x.mkString is the entire line that was read from the fix width file
+  
+val (rest, result) = pos.foldLeft((str, List[String]())) {
+case ((s, res),curr) =>
+    if(s.length()<=curr)
+    {
+    val split=s.substring(0).trim()
+    val rest=""
+    (rest, split :: res)
+    }
+    else if(s.length()>curr)
+    {
+    val split=s.substring(0, curr).trim()
+    val rest=s.substring(curr)
+    (rest, split :: res)
+    }
+    else
+    {
+    val split=""
+    val rest=""
+    (rest, split :: res)
+    }
+}
+// list is reversed
+// result.reverse.toString()
+Row.fromSeq(result.reverse)
+}
+
+// COMMAND ----------
+
+def ReadFixWidthFile(spark: SparkSession,
+                     filemonth: String,
+                     filepath: String,
+                     filename: String): DataFrame = {
+  val FileInfoList = (
+    FixWidth_Dictionary
+      .get(filename)
+      .toList
+  )
+  
+  val fileschema = FileInfoList(0)._1
+  
+  val filecolumnsize = FileInfoList(0)._2
+
+  //Read file
+  val rdd = (
+    spark
+      .sparkContext
+      .textFile(s"${filepath}/${filemonth}/${filename}")
+  )
+  
+  //skip header  rows starting with 99999. The row has different fixed widths. Hard coded 999s may be parameterized.
+  val data = (
+    rdd
+      .filter((x:String) => !x.startsWith("99999"))
+  )
+
+  //call parser function for each line. Pass list of column sizes and file schema. Convert parsed data into a Dataframe
+  spark
+    .createDataFrame(data
+                       .map { x=>; lsplit(filecolumnsize, x) },
+                     fileschema)
+    .withColumn("FileDate",
+                lit(filemonth))
+    .withColumn("FileName",
+                lit(filename))
+}
+
+// COMMAND ----------
+
+//Adding ReadFixWidthFileHCP new function to handle Medispan (HCP) specific files ( Similar to NCPDP ) but this folder has aplha numeric characters so had to build new function
+def ReadFixWidthFileHCP(spark: SparkSession,
+                        filemonth: String,
+                        filepath: String,
+                        filename: String): DataFrame = {
+  val FileInfoList = (
+    FixWidth_Dictionary
+      .get(filename)
+      .toList
+  )
+  
+  val fileschema = FileInfoList(0)._1
+  
+  val filecolumnsize = FileInfoList(0)._2
+  
+  // NCPDP is date specific but HCP has alpha characters to read thats the reason below code has been changed
+  //Read file
+  val rdd = (
+    spark
+      .sparkContext
+      .textFile(filepath)
+  )
+  
+  //skip header rows starting with 99999. The row has different fixed widths. Hard coded 999s may be parameterized.
+  val data = (
+    rdd
+      .filter((x:String) => !x.startsWith("99999"))
+  )
+
+  //call parser function for each line. Pass list of column sizes and file schema. Convert parsed data into a Dataframe
+  spark
+    .createDataFrame(data
+                       .map { x=>; lsplit(filecolumnsize, x) },
+                     fileschema)
+    .withColumn("FileDate",
+                lit(filemonth))
+    .withColumn("FileName",
+                lit(filename))
+}
+
+// COMMAND ----------
+
+def ExecSQLQuery(spark: SparkSession,
+                 url: String,
+                 database: String,
+                 user: String,
+                 password: String,
+                 sqlquery: String): String = {
+  
+  val config = Config(Map(
+      "url"                    -> url,
+      "databaseName"           -> database,
+      "user"                   -> user,
+      "password"               -> password,
+      "queryCustom"            -> sqlquery,
+      "trustServerCertificate" -> "true",
+      "encrypt"                -> "true",
+      "connectTimeout"         -> "100",
+      "queryTimeout"           -> "500"
+    
+  )) 
+  sqlContext.sqlDBQuery(config)
+  return "ExecSQLQuery-Success"
+}
+
+// COMMAND ----------
+
+def ExecSQLQueryReturnDF(spark: SparkSession,
+                         url: String,
+                         database: String,
+                         user: String,
+                         password: String,
+                         sqlquery: String): DataFrame = {
+  
+  val config = Config(Map(
+      "url"                      -> url,
+      "databaseName"             -> database,
+      "user"                     -> user,
+      "password"                 -> password,
+      "queryCustom"              -> sqlquery,
+      "trustServerCertificate"   -> "true",
+      "encrypt"                  -> "true",
+      "connectTimeout"           -> "100",
+      "queryTimeout"             -> "500"
+  )) 
+  val df = spark.read.sqlDB(config)
+  return df
+}
+
+// COMMAND ----------
+
+def DFBulkCopyToDW(spark: SparkSession,
+                   url: String,
+                   database: String,
+                   user: String,
+                   password: String,
+                   MDPTable: String,
+                   df: DataFrame): String = {
+  
+  val bulkConfig = Config(Map(
+      "url"               -> url,
+      "databaseName"      -> database,
+      "dbTable"           -> MDPTable,
+      "user"              -> user,
+      "password"          -> password,
+      "bulkCopyBatchSize" -> "100000",
+      "bulkCopyTableLock" -> "true",
+      "bulkCopyTimeout"   -> "600",
+      "driver"            -> "com.microsoft.sqlserver.jdbc.SQLServerDriver"
+  )) 
+  df.bulkCopyToSqlDB(bulkConfig)
+  return "Success"
+}
+
+// COMMAND ----------
+
+def writetoSqlDW(spark:org.apache.spark.sql.SparkSession,
+                dataFrame: => DataFrame,
+                url: String,
+                dbTable: String,
+                tempDir: String,
+                mode: String
+                ): String = {
+  
+                   dataFrame.write
+                          .format("com.databricks.spark.sqldw")
+                          .option("url", url)
+                          .option("useAzureMSI", "true") 
+                          .option("dbTable", dbTable)
+                          .option("tempDir", tempDir)
+                          .mode(mode)
+                          .save()
+               
+          return "Success"
+}
+
+// COMMAND ----------
+
+  // chksum is the type of checksum, i.e. MD5, SHA-256, SHA-512 or whatever
+  // path is the path to the file you want to get the hash of
+  def getHash(chksum: String, path: String): String = {
+    val arr = Files readAllBytes (Paths get path)
+    val checksum = MessageDigest.getInstance(chksum) digest arr
+    checksum.map("%02X" format _).mkString
+  }
+
+// COMMAND ----------
+
+ def filecmp(chksum: String, filepath1: String, filepath2: String): String ={
+   
+   val filehash1 = getHash(chksum,filepath1)
+   val filehash2 = getHash(chksum,filepath2)
+   
+     if(filehash1 == filehash2) {"File match"}
+   else {"Files don't match"}
+   
+ }
+   // usage:
+   // val result = filecmp("SHA-256",file_path1,file_path2)
+
+// COMMAND ----------
+
+def jobHistoryForETLJOb(jobHistoryDf: DataFrame) ={
+    
+   try {
+     import spark.implicits._
+
+      //ToDo: Compare with Old JobHistory Dataset with New Jobhistory
+     //val jobHistoryOldDf = spark.sql("select * from pharmacy_raw.etlmetadata")
+      //val compare_old_new_df = jobHistoryOldDf.join(jobHistoryDf,"left")
+     try {
+       //ToDo: Merge Option for Upserts and Inserts for Delta Dataset
+       //UpdateDailyLoadForDelta(env,jobHistoryDf)
+       jobHistoryDf.write.format("delta").mode("append").save("/mnt/operational/ETLMetadata")
+     }
+     catch {
+       case e: Exception => throw new Exception("Error in DB update section : deltaUpdate/Write Method", e)
+     }
+   }
+
+ catch
+     {
+       case e: Exception => throw new Exception("Error in DB Read : deltaRead Method", e)
+     }
+
+   }
+
+
+// COMMAND ----------
+
+def writeLoadInfoAudt(dfInput: DataFrame) ={
+    
+   try {
+     import spark.implicits._
+
+      //ToDo: Compare with Old JobHistory Dataset with New Jobhistory
+     //val jobHistoryOldDf = spark.sql("select * from pharmacy_raw.etlmetadata")
+      //val compare_old_new_df = jobHistoryOldDf.join(jobHistoryDf,"left")
+     try {
+       //ToDo: Merge Option for Upserts and Inserts for Delta Dataset
+       //UpdateDailyLoadForDelta(env,jobHistoryDf)
+       dfInput.write.format("delta").mode("append").save(loadInfoAudtPath)
+     }
+     catch {
+       case e: Exception => throw new Exception("Error in DB update section : deltaUpdate/Write Method", e)
+     }
+   }
+
+ catch
+     {
+       case e: Exception => throw new Exception("Error in DB Read : deltaRead Method", e)
+     }
+
+   }
+
+// COMMAND ----------
+
+import java.util.Date 
+def getDateAsString(): String = {
+  val inputpattern = "yyy-MM-dd HH:mm:ss"
+  val dateFormat = new java.text.SimpleDateFormat(inputpattern)
+  dateFormat.format(new Date())
+  }
+
+// COMMAND ----------
+
+def rollBackDeltaTablebyDelete(spark:org.apache.spark.sql.SparkSession, dfSource: DataFrame, deltaTablePath: String, rollbackConditon: String) : String =
+{
+  // This Method works with base, cleanse layers as the 
+
+  try
+  {
+
+    // delete the record that matches the condition between Target delta table and Source DataFrame
+    
+    DeltaTable.forPath(spark,deltaTablePath).as("Target")
+             .merge(
+               dfSource.as("Source"),
+               rollbackConditon)
+               .whenMatched()
+               .delete()
+               .execute()
+    
+  }
+  catch
+  {
+       case e: Exception => 
+           {
+               
+                throw new Exception("Rollback failed on " + deltaTablePath, e)
+           }
+  }
+  
+  return  "Successful Rollback"
+  
+}
+
+// COMMAND ----------
+
+def rollBackDeltaTable(spark:org.apache.spark.sql.SparkSession, deltaTablePath: String, rollbackVersion: String) : String =
+{
+try
+  {
+
+        // Read Rollback Version Dataframe
+      val dfRollbackVersionDeltaTable =  spark.read.format("delta").option("versionAsOf", rollbackVersion).load(deltaTablePath)               
+
+      // Overwrite the delta table with previous version
+    dfRollbackVersionDeltaTable.write.format("delta").mode("overwrite").save(deltaTablePath)
+    
+   }
+  catch
+  {
+       case e: Exception => 
+           {
+               
+                throw new Exception("Rollback failed on " + deltaTablePath, e)
+           }
+  }
+return  "Successful Rollback"
+  
+}
+
+// COMMAND ----------
+
+def getDeltaTableCurrentVersion(spark:org.apache.spark.sql.SparkSession,deltaTablePath:String) : String =
+{
+  try
+  {
+ return  String.valueOf(DeltaTable.forPath(spark,deltaTablePath).history(1).first.getAs[Long]("version")) 
+  }
+ catch
+  {
+       case e: Exception => 
+           {
+               
+                throw new Exception("Unable to get the current version for  " + deltaTablePath, e)
+           }
+  }
+
+
+}
+
+// COMMAND ----------
+
+/** generate an automatically incrementing number column that can be used in detaframes
+ *  @param dfInput is source dataframe which needs 
+ *         the sequential row number as surrogate key  
+ *  @param intStart is the starting row number for the sequence
+ *          each subsequent row is assigned the next identity value,
+ *          which is equal to the last row value plus the increment value
+ *  @param incColumnName is the name that will be assigned to incremental column
+ *
+ *  Returns a valid dataframe with addtional column as rownumber
+ */
+
+def addIncrementalId(dfInput:DataFrame, incColumnName:String, intStart: Long = 0): DataFrame = {
+
+  //Add partition_id to rows.
+  val pDataset  = dfInput.limit(dfInput.count().toInt)
+  var df = pDataset.withColumn("partitionId", spark_partition_id)
+
+  //Get row_number() within partition id.
+  val window = Window.orderBy("partitionId").partitionBy("partitionId")
+      df = df.withColumn("partitionRow", row_number().over(window))
+  
+  //Calculate summary values of partitions.
+  var df_partition_values = df.groupBy("partitionId").count()
+      df_partition_values = df_partition_values.withColumn("cumsum", expr("sum(count) over (order by partitionId)"))
+      df_partition_values = df_partition_values.withColumn("start", expr("cumsum - count"))
+      df_partition_values = df_partition_values.drop("count", "cumsum")
+  
+  //Recalibrate row_number() based on partition and cumulative sum.
+      df = df.join(df_partition_values, df("partitionId") === df_partition_values("partitionId"), "inner")
+      df = df.withColumn(s"${incColumnName}", (expr("partitionRow + start") + intStart).cast("long"))
+      df = df.drop("partitionId", "partitionRow", "start")
+   
+  return df
+
+}
+
+// COMMAND ----------
+
+/** generate Surrogate Key for the dataframe based on the target detlta table 
+ *  @param dfInput source dataframe which needs 
+ *         the sequential row number as surrogate key  
+ *  @param targetDeltaTablePath is the path 
+ *         for the  target delta table
+ *  @param surrogateKey is contains the surrogateKey column name      
+ */
+def generateSk(dfInput:DataFrame, targetDeltaTablePath: String, surrogateKey: String): DataFrame = 
+{
+  
+  
+  // get the Max value from the target delta table for the surrogate key
+  val max_row_value = spark.read.format("delta").load(targetDeltaTablePath).agg(max(surrogateKey)).na.fill(0).first.getLong(0)
+  
+  // call the function which will assign the incremental value
+  val df =  addIncrementalId(dfInput, surrogateKey, max_row_value)
+  
+  return df
+}
+
+// COMMAND ----------
+
+/** Concatenates seperate BK columns and appends as one new column
+ *
+ *  @param dfInput source dataframe used to gather
+ *         BK columns to be used in map function
+ *  @param strInputBkType type of table, used to determine
+ *         which fields should be concat'd into return BK
+ *  @return a dataframe with all of the BKs 
+ *         concatenated together in one column
+ */
+def getDynamicConcatBk(dfInput: DataFrame, strInputBkType: String): DataFrame = {
+  // Determine fields to filter to, in order to get columns to concat
+  val setBkType = strInputBkType match {
+    case "Tenant" => Set("Tenant_Static",
+                         "Tenant_Desc")
+    case _        => Set("Src_Cd_Sk",
+                         "Tenant_Sk", 
+                         "Load_Info_Sk",
+                         "StageInProcess",
+                         "ParentSubjectArea",
+                         "SubjectArea",
+                         "SourcePath",
+                         "SourceFileName",
+                         "TargetPath",
+                         "TargetFileName", 
+                         "SourceRecordCount",
+                         "DataStartDateTime",
+                         "DataEndDateTime",
+                         "FileName",
+                         "FileDate",
+                         "SourceColumnName",
+                         "Dmn_Nm",
+                         "Descr",
+                         "Max_Load_Info_Sk")
+  }
+  
+  // Return DataFrame with column containing concat'd BK
+  // Perform comparison between input DataFrame columns and set derived from input type
+  // Filters out those found in strInputBkType-specified list
+  dfInput
+    .withColumn(s"${strInputBkType}_Bk",
+                concat_ws("|",
+                          dfInput
+                            .columns                            
+                            .filterNot(dfInputColumns => setBkType
+                                                           .exists(setBkTypeColumns => dfInputColumns
+                                                                                         .contains(setBkTypeColumns)))
+                            .map(col): _*))
+}
+
+// COMMAND ----------
+
+/** Gets Tenant-table surrogate keys based upon input business keys
+ *
+ *  @param dfInput source dataframe used to join
+ *         against the tenant table to get Tenant_Sk
+ *  @return a dataframe with the Tenant SK 
+ *         from the lookup table
+ */
+def getAtomicTenantSk(dfInput: DataFrame): DataFrame = {
+  // Get DataFrame with concat'd BK
+  val dfWithConcatBk = getDynamicConcatBk(dfInput, "Tenant")
+  
+  // Create DataFrame on Tenant Delta table
+  val dfTenantTable = (
+    spark
+      .read
+      .format("delta")
+      .load(s"${atomicMountPointPath}Tenant")
+  )
+  
+  // Inner-Join dfInput to dfTenantTable on the Tenant_Bk value
+  // Select out all values from dfInput + Tenant SK column
+  dfWithConcatBk
+    .join(broadcast(dfTenantTable),
+          Seq("Tenant_Bk"),
+          "inner")
+    .select(dfWithConcatBk("*"),
+            dfTenantTable("Tenant_Sk"))
+}
+
+// COMMAND ----------
+
+// latest insert
+def insertCmnCodeSk(dfdmnsk:DataFrame,Rltnp_Cd:Long)= {
+
+ 
+  // Caching the input dataframe as after writing to one delta tables , the input dataframe was not existing.
+  dfdmnsk.cache()  
+
+ // getting the distinct values from the dataframe so that we only generate common codes from the unique data set
+val dfdmnskdist = dfdmnsk.select($"Cmn_Cd", $"Dmn_Nm", $"Tenant_Sk", $"Load_Info_Sk", $"Src_Cd_Sk", $"Dmn_Sk").distinct
+
+ 
+//Read the data from delta tables 
+  
+val dfcmnCd =   generateSk(dfdmnskdist , atomicMountPointPath + "Cmn_Cd", "Cmn_Cd_Sk")
+val dftenantcmnCd = generateSk(dfdmnskdist , atomicMountPointPath + "Tenant_Cmn_Cd", "Tenant_Cmn_Cd_Sk")
+
+// The dataframe to write the data to Cmn Cd
+val dfCmnCodeTb = dfcmnCd 
+                 .withColumn("Descr",col("cmn_cd"))
+                 .withColumn("Descr_Full_Descr",lit (null))
+                 .withColumn("Sts_Ind",lit (1))
+                 .withColumn("Sts_Rsn_Cd_Sk",lit(null))
+                 .withColumn("Vld_Fm_Ts",current_timestamp())
+                 .withColumn("Vld_To_Ts",to_timestamp(lit("9999-12-31T23:59:59.999+0000")))
+                 .withColumn("Eff_Fm_Dt",current_timestamp())
+                 .withColumn("Eff_To_Dt",to_timestamp(lit("9999-12-31T23:59:59.999+0000")))
+                .select (col("Cmn_Cd_Sk"),
+                         col("Dmn_Sk"),
+                         col("Tenant_Sk"),
+                         col("Load_Info_Sk"), 
+                         col("cmn_cd").alias("Cd"),
+                         col("Descr"), 
+                         col("Descr_Full_Descr"),
+                         col("Sts_Ind"), 
+                         col("Sts_Rsn_Cd_Sk"),
+                         col("Vld_Fm_Ts"), 
+                         col("Vld_To_Ts"),
+                         col("Eff_Fm_Dt"), 
+                         col("Eff_To_Dt")                     
+                  )
+   
+//Writing to the delta table Cmn_Cd
+  
+  dfCmnCodeTb.write.format("delta").mode("append").save(atomicMountPointPath + "Cmn_Cd") 
+
+  
+
+  
+// The dataframe to write the data to Tenant_Cmn_Cd
+  
+val dfTenantCmnCodeTb = dftenantcmnCd
+                 .withColumn("Tenant_Cmn_Cd",dftenantcmnCd ("cmn_cd"))            
+                 .withColumn("Tenant_Cmn_Cd_Descr",col("Tenant_Cmn_Cd"))
+                 .withColumn("Vld_Fm_Ts",current_timestamp())
+                .withColumn("Vld_To_Ts",to_timestamp(lit("9999-12-31T23:59:59.999+0000")))
+               .withColumn("Eff_Fm_Dt",current_timestamp())
+               .withColumn("Eff_To_Dt",to_timestamp(lit("9999-12-31T23:59:59.999+0000")))
+              .select (col("Tenant_Cmn_Cd_Sk"),
+                       col("Dmn_Sk"),
+                       col("Tenant_Sk"),
+                       col("Load_Info_Sk"), 
+                       col("Src_Cd_Sk"), 
+                       col("Tenant_Cmn_Cd"),
+                       col("Tenant_Cmn_Cd_Descr"),
+                       col("Vld_Fm_Ts"), 
+                       col("Vld_To_Ts"),
+                       col("Eff_Fm_Dt"), 
+                       col("Eff_To_Dt")                     
+                      )
+
+ 
+//Writing to the delta table Tenant_Cmn_Cd
+ dfTenantCmnCodeTb.write.format("delta").mode("append").save(atomicMountPointPath + "Tenant_Cmn_Cd")
+ 
+
+//Reading the data from Delta tables
+
+val dfCd_Dmn = spark.read.format("delta").load(atomicMountPointPath + "Cd_Dmn") 
+val dfCmn_Cd = spark.read.format("delta").load(atomicMountPointPath + "Cmn_Cd") 
+val dfTenant_Cmn_Cd = spark.read.format("delta").load(atomicMountPointPath + "Tenant_Cmn_Cd") 
+  
+  
+// The dataframe to write the data to Cmn_Cd_2_Tenant_Cmn_Cd
+  
+val dfCmn_Cd_2_TenantCmnCodeTb = dfCmn_Cd.alias("dfCmn_Cd")
+                                 .join(dfTenant_Cmn_Cd.alias("dfTenant_Cmn_Cd"),$"dfTenant_Cmn_Cd.Tenant_Cmn_Cd" ===  $"dfCmn_Cd.Cd" 
+                                                                                  && $"dfTenant_Cmn_Cd.Dmn_Sk" ===  $"dfCmn_Cd.Dmn_Sk")
+                                 .join(dfCmnCodeTb.alias("dfCmnCodeTb"),Seq("Cd","Dmn_Sk"))
+                                .withColumn("Rltnp_Type_Cd_Sk",lit(Rltnp_Cd))
+                                                      
+                .select ($"dfCmn_Cd.Cmn_Cd_Sk",
+                         $"dfTenant_Cmn_Cd.Tenant_Cmn_Cd_Sk",
+                         $"dfCmn_Cd.Vld_Fm_Ts",
+                         $"Rltnp_Type_Cd_Sk", 
+                         $"dfCmn_Cd.Vld_To_Ts", 
+                         $"dfCmn_Cd.Eff_To_Dt",
+                         $"dfCmn_Cd.Eff_Fm_Dt",
+                         $"dfCmn_Cd.Tenant_Sk",
+                         $"dfCmn_Cd.Load_Info_Sk", 
+                         $"dfTenant_Cmn_Cd.Src_Cd_Sk"                     
+                    )
+  
+
+//Writing to the delta table Cmn_Cd_2_Tenant_Cmn_Cd
+  
+dfCmn_Cd_2_TenantCmnCodeTb.write.format("delta").mode("append").save(atomicMountPointPath + "Cmn_Cd_2_Tenant_Cmn_Cd")
+ 
+  
+  
+dfdmnsk.unpersist() 
+}
+
+
+
+// COMMAND ----------
+
+//Get the Common Code Sk values.latest read
+def getCmnCdSk (dfinputCode:DataFrame ): DataFrame = {
+
+// Reading the delta tables Common code and Domain Name
+  
+  
+val dfCd_Dmn = spark.read.format("delta").load(atomicMountPointPath + "Cd_Dmn") 
+val dfCmn_Cd = spark.read.format("delta").load(atomicMountPointPath + "Cmn_Cd") 
+
+ // Fetching the distinct records from input with max load_info_Sk  
+  
+val dfInputDistinct = dfinputCode.alias("dfinputCode").select($"Cmn_Cd", $"Dmn_Nm", $"Tenant_Sk", $"Load_Info_Sk", $"Src_Cd_Sk" ).distinct
+                                                             .groupBy($"Cmn_Cd", $"Dmn_Nm", $"Tenant_Sk", $"Src_Cd_Sk" ).agg(max($"Load_Info_Sk").as("Load_Info_Sk")) 
+  
+// Lookup in common code table to find the codes to be inserted
+  
+val dfCmnCodeSKlookup = dfInputDistinct.alias("dfInputDistinct")
+                                       .join (dfCd_Dmn.alias("dfCd_Dmn"),Seq("Dmn_Nm"),"inner")
+                                       .join (dfCmn_Cd.alias("dfCmn_Cd"),dfCd_Dmn("Dmn_Sk") === dfCmn_Cd("Dmn_Sk") && dfInputDistinct("cmn_cd") === dfCmn_Cd("Cd"),"left")
+                                       .select (dfInputDistinct("*"),dfCd_Dmn("Dmn_Sk"),dfCmn_Cd("Cd"))
+
+  
+// Cd with null from dfCmn_Cd is selected to be inserted
+val dfCmnCodeSkInsert =dfCmnCodeSKlookup.where(dfCmnCodeSKlookup.col("Cd").isNull)  //has records to be inserted
+                                        .select(dfCmnCodeSKlookup("*")) 
+                                        .drop("Cd")
+  
+// Validating if the Insert dataframe is empty. If it is empty it will go for reading from common code table
+    if  (!dfCmnCodeSkInsert.isEmpty)
+  
+  {
+   
+   // Fetching Rltnp_Type_Cd_Sk where Desc = "Related Code"
+    
+   val rltnpsk =  dfCmn_Cd.where("Descr = 'Related Code'") 
+                          .select (dfCmn_Cd("Cmn_Cd_Sk").cast("Long")) 
+                           .distinct()
+  val Rltnp_Cd = rltnpsk.first.getLong(0)
+    
+  
+
+                      
+//Calling the insert function. The dataframe has the codes to be written and the Rltnp_Cd has the value to be populated in field Rltnp_Type_Cd_Sk
+     insertCmnCodeSk(dfCmnCodeSkInsert,Rltnp_Cd) 
+           
+  }
+  
+ 
+ //Reading the data from the delta tables.
+val dfTenant_Cmn_Cd = spark.read.format("delta").load(atomicMountPointPath + "Tenant_Cmn_Cd") 
+val dfCmn_Cd_2_Tenant = spark.read.format("delta").load(atomicMountPointPath + "Cmn_Cd_2_Tenant_Cmn_Cd") 
+  
+ 
+//Reading the CommonCodeSk for the distinct codes as input.
+  
+ val  dfCmnCodeSk =   dfTenant_Cmn_Cd.as("dfTenant_Cmn_Cd")
+                                 .join(dfCmn_Cd_2_Tenant.as("dfCmn_Cd_2_Tenant"),Seq("Tenant_Cmn_Cd_Sk"))  
+                                 .join(dfCd_Dmn.as("dfCd_Dmn"), Seq("Dmn_Sk"))
+                                 .join(dfInputDistinct.as("dfInputDistinct"),$"dfInputDistinct.Cmn_Cd" === $"dfTenant_Cmn_Cd.Tenant_Cmn_Cd")
+                                 .where($"dfCd_Dmn.Dmn_Nm" === $"dfInputDistinct.Dmn_Nm") 
+                                 .select(dfCmn_Cd_2_Tenant("Cmn_Cd_Sk"),
+                                         dfTenant_Cmn_Cd("Tenant_Cmn_Cd_Descr"),
+                                         dfInputDistinct("*")) 
+ 
+
+  // Joining the distinct CommoncodeSk back to the input dataframe to return the complete list of records.
+ dfinputCode.alias("dfinputCode")
+                              .join (dfCmnCodeSk.alias("dfCmnCodeSk"),Seq("Cmn_Cd","Dmn_Nm","Tenant_Sk") )
+                              .select ($"dfinputCode.*",
+                                       $"dfCmnCodeSk.Cmn_Cd_Sk") 
+ }
+
+
+// COMMAND ----------
+
+/** Inserts Anchor-table BKs, thus generating associated SKs
+ *
+ *  @param dfInput the input DataFrame, passed to generateSk()
+ *  @param strTargetTable the target anchor table name
+ */
+def insertAtomicAnchorBk(dfInput: DataFrame,
+                         strTargetTable: String): Unit = {
+  generateSk(dfInput,
+             s"${atomicMountPointPath}${strTargetTable}",
+             s"${strTargetTable}_Sk")
+    .select(s"${strTargetTable}_Sk",
+            s"${strTargetTable}_Bk",
+            "Type_Cd_Sk",
+            "Tenant_Sk",
+            "Load_Info_Sk")
+    .write
+    .format("delta")
+    .mode("append")
+    .save(s"${atomicMountPointPath}${strTargetTable}")
+}
+
+// COMMAND ----------
+
+/** Gets a DataFrame with the max Load_Info_Sk value over the dataset
+ *
+ *  @param dfInput input dataframe used to get max Load_Info_Sk
+ *  @return a dataframe with the max Load_Info_Sk on each row
+ */
+def getMaxLoadInfoAudtSk(dfInput: DataFrame): DataFrame = {
+  val setExclusionList = Set("Src_Cd_Sk",
+                             "Tenant_Sk", 
+                             "Load_Info_Sk",
+                             "StageInProcess",
+                             "ParentSubjectArea",
+                             "SubjectArea",
+                             "SourcePath",
+                             "SourceFileName",
+                             "TargetPath",
+                             "TargetFileName", 
+                             "SourceRecordCount",
+                             "DataStartDateTime",
+                             "DataEndDateTime",
+                             "FileName",
+                             "FileDate",
+                             "SourceColumnName",
+                             "Dmn_Nm",
+                             "Descr",
+                             "Max_Load_Info_Sk")
+  
+  dfInput
+    .alias("dfJoin")
+    .withColumn("Max_Load_Info_Sk",
+                row_number()
+                  .over(Window
+                          .partitionBy(dfInput
+                                         .columns
+                                         .filterNot(dfInputColumns => setExclusionList
+                                                                        .exists(setBkTypeColumns => dfInputColumns
+                                                                                                      .contains(setBkTypeColumns)))
+                                         .map(col(_)): _*)
+                          .orderBy(col("Load_Info_Sk")
+                                     .desc)))
+	.filter(col("Max_Load_Info_Sk") === 1)
+}
+
+// COMMAND ----------
+
+ /** Gets Anchor-table surrogate keys based upon input business keys
+ *
+ *  @param dfInput input dataframe used
+ *         in left-side of join
+ *  @param strAnchorTarget target detail table containing 
+ *         existing records & SK's
+ *  @return a dataframe containing all of the 
+ *          SK's for the BK's provided
+ */
+def getAtomicAnchorSk(dfInput: DataFrame,
+                      strAnchorTarget: String): DataFrame = {
+  // Get DataFrame with concat'd BK
+  val dfWithConcatBk = (
+    getCmnCdSk(getDynamicConcatBk(getMaxLoadInfoAudtSk(dfInput),
+                                  strAnchorTarget))
+      .withColumnRenamed("Cmn_Cd_Sk",
+                         "Type_Cd_Sk")
+  )
+  
+  // Create DataFrame on dfTarget Delta table
+  var dfTarget = (
+    spark
+      .read
+      .format("delta")
+      .load(s"${atomicMountPointPath}${strAnchorTarget}")
+  )
+  
+  // Join to the target anchor table to get missing BKs
+  // Insert missing BKs to generate new SKs
+  insertAtomicAnchorBk(
+    dfWithConcatBk
+      .join(dfTarget,
+            Seq(s"${strAnchorTarget}_Bk",
+                "Tenant_Sk",
+                "Type_Cd_Sk"),
+            "left_outer")
+      .filter(dfTarget(s"${strAnchorTarget}_Bk")
+                .isNull)
+      .drop(dfTarget("Load_Info_Sk")),
+    strAnchorTarget
+  )
+  
+  // Re-read dfTarget Delta table to reflect updated storage
+  dfTarget = (
+    spark
+      .read
+      .format("delta")
+      .load(s"${atomicMountPointPath}${strAnchorTarget}")
+  )
+  
+  // Re-join input DataFrame with concat'd BKs to target to get new/existing SKs
+  dfWithConcatBk
+    .join(dfTarget,
+          Seq(s"${strAnchorTarget}_Bk",
+              "Tenant_Sk",
+              "Type_Cd_Sk"),
+          "inner")
+    .select(dfWithConcatBk("*"),
+            dfTarget(s"${strAnchorTarget}_Sk"))
+}
+
+// COMMAND ----------
+
+/** Gets delta-records between input Dataframe and LoadInfoAudit
+ *
+ *  @param dfInput the input DataFrame used as left-side
+ *         of join
+ *  @param strSourceType the type of data-source
+ *         that determines join-key, eg: "file", "table"
+ *  @param mapInputFilters a map-object containing the
+ *         columns to filter on, in string-form
+ *         (Columns in join-key that compare
+ *         against literal values should go here)
+ *  @return a DataFrame-object containing delta records
+ *          between input DataFrame and ETL Metadata
+ */
+def getLoadInfoAuditDelta(dfInput: DataFrame,
+                          strSourceType: String,
+                          mapInputFilters: Map[String, Any]): DataFrame = {
+  val seqJoinKey = strSourceType match {
+    case "file"  => Seq("FileName",
+                        "FileDate")
+    case "table" => Seq("DataEndDateTime")
+  }
+  
+  dfInput
+    .join(spark
+            .read
+            .format("delta")
+            .load(loadInfoAudtPath)
+            .filter(col("StageInProcess")    === mapInputFilters("StageInProcess")    &&
+                    col("ParentSubjectArea") === mapInputFilters("ParentSubjectArea") &&
+                    col("SubjectArea")       === mapInputFilters("SubjectArea")       &&
+                    col("SourceFileName")    === mapInputFilters("SourceFileName")    &&
+                    col("TargetFileName")    === mapInputFilters("TargetFileName")),
+          seqJoinKey,
+          "left_anti")
+    .withColumn("StageInProcess",
+                lit(mapInputFilters("StageInProcess")))
+    .withColumn("ParentSubjectArea",
+                lit(mapInputFilters("ParentSubjectArea")))
+    .withColumn("SubjectArea",
+                lit(mapInputFilters("SubjectArea")))
+    .withColumn("SourceFileName",
+                lit(mapInputFilters("SourceFileName")))
+    .withColumn("TargetFileName",
+                lit(mapInputFilters("TargetFileName")))
+}
+
+// COMMAND ----------
+
+/** Deletes and vacuums data from specified Delta table
+ *
+ *  @param strTargetPath the path to the delta table to delete
+ */
+def emptyDeltaTable(strTargetPath: String): Unit = {
+  import io.delta.tables._
+  
+  spark
+    .conf
+    .set("spark.databricks.delta.retentionDurationCheck.enabled",
+         "False")
+  
+  DeltaTable
+    .forPath(spark,
+             strTargetPath)
+    .delete()
+  
+  DeltaTable
+    .forPath(spark,
+             strTargetPath)
+    .vacuum(0)
+  
+  spark
+    .conf
+    .set("spark.databricks.delta.retentionDurationCheck.enabled",
+         "True")
+}
+
+// COMMAND ----------
+
+/** Here are the following activities this function perform.
+ *   This function used to identify the Active records from Target. 
+ *   Once the Active records are identified, try to match with Source data to identyfy only the matching source to target data to minimize the hashing overhead.
+ *   Rank data and add ROW_NUMBER in case there is multiple instance of data present to the input.
+ *   Generate Hash values from the list of desired columns for the comparison and determine if Insert Or Update Or Ignore
+ *   Add audit columns to the dataframe for the target
+ *   Generate join condition for Merge operation
+ *   Run Merge operation
+ 
+ *  @param businessKeySeq: Expect business key/Keys of the table which is mostly Surrogate Key
+ *  @param inputForRank: This is rank condition based on Partitioned By and Order By
+ *  @param sourceDataFrame: Dataframe used for left side of the comparison. 
+ *  @param targetPath: This is the path to the destination delta table.
+ *  @return String: It will specify "Success if everything runs step by steps
+ 
+ *--------------------------------------------
+ *  var businessKeySeq= businessKeyColumnSeq
+ *  var inputForRank = windowPartitionAndOrderByColumns
+ *  var sourceDataFrame = dfReadSourceTransformed
+ *  var targetPath = targetFullPath
+
+ *  Calling function: val returndeltaHashAndMerge= deltaHashAndMerge(businessKeyColumnSeq,windowPartitionAndOrderByColumns,dfReadSourceTransformed,targetFullPath)
+ */
+
+def deltaHashAndMerge(businessKeySeq: Seq[String],inputForRank: org.apache.spark.sql.expressions.WindowSpec, sourceDataFrame: DataFrame,targetPath: String): Unit =
+{
+
+  //Identify only current active target records
+  val dfReadTargetActiveRecords = spark.read.format("delta").load(targetPath)
+                                .where(current_timestamp() > col("Vld_Fm_Ts") && current_timestamp() < col("Vld_To_Ts"))
+
+  //Identify matching target records from source to minimize unnecessary hashing.
+  val dfFilteredReadTargetActiveRecords = sourceDataFrame
+                                          .select(businessKeySeq.map(c => col(c)): _*)
+                                          .distinct
+                                       .join(dfReadTargetActiveRecords,businessKeySeq,"inner" )
+
+  // Add ROW_NUMBER to the Source Data Frame to make sure all historical instance of data from a single file is captured
+  val sourceDataFrameWithRank = sourceDataFrame
+                        .withColumn("rank",row_number().over(inputForRank))  
+  
+
+  //Collect and determine Hashcolumns for comparison
+  var hashColumns = dfReadTargetActiveRecords.columns
+  //Load_Info_Sk,Vld_Fm_Ts,Vld_To_Ts,Eff_Fm_Dt,Eff_To_Dt should not be included for hash column
+  hashColumns = hashColumns.filter(field => field !="Load_Info_Sk" && field !="Vld_Fm_Ts" && field !="Vld_To_Ts"&& field !="Eff_Fm_Dt" &&field !="Eff_To_Dt")  
+  //Ignore business keys from Hash column list 
+  for (column<-businessKeySeq)
+  {
+    hashColumns = hashColumns.filter(field => field !=column)
+  }  
+  // Build Hash column based on the column list from source except surrogate Key
+  val dfSourceWithHash = sourceDataFrameWithRank.withColumn("hash", hash(hashColumns.map(colName => col(colName)):_*)).where("rank='1'")
+  val dfTargetWithHash = dfFilteredReadTargetActiveRecords.withColumn("hash", hash(hashColumns.map(colName => col(colName)):_*))
+
+
+  // Join DataFrame based on SK column; if Hash does not match but SK have match, update; if new, Insert.
+  val dfIdentifyMerge = dfSourceWithHash.join(dfTargetWithHash,businessKeySeq,"left")
+                    .withColumn("MergeDecision",when(dfSourceWithHash("hash") =!= dfTargetWithHash("hash"), "Update")
+                    .when(dfTargetWithHash("hash").isNull,"Insert")
+                    .otherwise("Ignore"))
+  .select(dfSourceWithHash("*"),col("MergeDecision"),dfTargetWithHash("Vld_Fm_Ts").alias("Active_Vld_Fm_Ts"))  
+
+// Add extra column what is needed to be populated by ETL process. For updated records, Vld_Fm_Ts is swapped by Active_Vld_Fm_Ts to make sure only last active record is updated.
+ 
+  val dfFinalMerge = dfIdentifyMerge.filter(col("MergeDecision") === "Update" || col("MergeDecision") === "Insert" )  
+                      .withColumn("MergeDecision",lit("Insert"))
+                    .union(dfIdentifyMerge.filter(col("MergeDecision") === "Update" && col("rank")===1)
+                           )
+   // Current Date column has "-10" second ; This 10 seconds determines, even if we have 9 instance of data, it will make sure older data is updated first before adding new rows. 
+                      .withColumn("CurrentDate",to_timestamp(unix_timestamp(current_timestamp()) -10))
+   //This logic is to make sure multiple instance of same key data is captured correctly with 1 second of difference between from date , To date, successor and predecessor.
+                      .withColumn("Vld_Fm_Ts",to_timestamp(unix_timestamp(current_timestamp()) - (col("rank") + (col("rank") -2))))
+                      .withColumn("Vld_To_Ts",when(col("rank")===1,to_timestamp(lit("9999-12-31T23:59:59.999+0000")))
+                                              .otherwise(to_timestamp(unix_timestamp(col("Vld_Fm_Ts"))+1)))   
+   //As per business ; Valid and Effective to/from date would be same
+                      .withColumn("Eff_Fm_Dt",col("Vld_Fm_Ts"))
+                      .withColumn("Eff_To_Dt",col("Vld_To_Ts"))
+   //This is to make sure for updated row, Current record's valid from date is captured/replaced for match the target record to update during merge operation   
+                      .withColumn("Vld_Fm_Ts",when (col("MergeDecision") === "Update",col("Active_Vld_Fm_Ts"))
+                                              .otherwise(col("Vld_Fm_Ts")))
+ 
+//Generate dynamic conditions passed through the parameters; Only AND condition will work.
+ var condition = " Target.Vld_Fm_Ts = Source.Vld_Fm_Ts AND "
+
+   for (column<-businessKeySeq)
+   {
+     condition = condition + "Target." + column+ " = Source." + column + " AND "
+   }
+  
+  condition = condition.substring(0,condition.size-4)
+  
+   DeltaTable.forPath(spark,targetPath)
+     .as("Target")
+     .merge(dfFinalMerge.as("Source"),    
+            condition
+           )
+   .whenMatched("Source.MergeDecision='Update'")
+   .updateExpr(Map(
+       "Vld_To_Ts" -> "Source.CurrentDate",
+       "Eff_To_Dt" -> "Source.CurrentDate"   ))
+   .whenNotMatched("Source.MergeDecision='Insert'")
+   .insertAll()
+   .execute()
+  
+ //return "Success"
+}
+
+// COMMAND ----------
+
+/** Creates DataFrame to be inserted into the LoadInfoAudt table
+ *
+ *  @param dfInput the input driving DataFrame used in the process
+ *  @param targetPath the path to the target Atomic table
+ *  @return a DataFrame-object containing records for insertion
+ *          into LoadInfoAudt
+ */
+def createLoadInfoAudt(dfInput: DataFrame, targetPath: String): DataFrame = {
+  val dfAtomicTargetTable = (
+    spark
+      .read
+      .format("delta")
+      .load(targetPath)
+  )
+  
+  val dfInputDistinct = (
+    dfInput
+      .alias("dfInput")
+      .withColumn("LoadEndDatetime",
+                  current_timestamp())
+      .withColumn("NotebookPath",
+                  lit(dbutils
+                        .notebook
+                        .getContext()
+                        .notebookPath
+                        .get))
+      .withColumn("ADFPipeline",
+                  lit(""))
+      .withColumn("LoadStartDatetime",
+                  lit(LoadStartDatetime)
+                    .cast("timestamp"))
+      .withColumn("LoadEndDatetime",
+                  current_timestamp())
+      .withColumn("IncrementalKeyFields",
+                  lit("FileName, FileDate"))
+      .withColumn("SchedulerJobName",
+                  lit(""))
+      .select("StageInProcess",
+              "ParentSubjectArea",
+              "SubjectArea",
+              "SourcePath",
+              "SourceFileName",
+              "TargetPath",
+              "TargetFileName",
+              "FileName",
+              "FileDate",
+              "NotebookPath",
+              "ADFPipeline",
+              "DataStartDateTime",
+              "DataEndDateTime",
+              "SourceRecordCount",
+              "LoadStartDatetime",
+              "LoadEndDatetime",
+              "IncrementalKeyFields",
+              "SchedulerJobName",
+              "Load_Info_Sk")
+      .distinct()
+  )
+  
+  
+  // to get the TargetRecordCount
+  val dfAtomicTableGroupBy = (
+    dfInputDistinct
+      .join(dfAtomicTargetTable,
+            Seq("Load_Info_Sk"),
+            "left_outer")
+      .groupBy("Load_Info_Sk")
+      .agg(count("*")
+             .cast("Integer")
+             .alias("TargetRecordCount"))
+  )
+     
+  // Joining base and cleanse dataframes to
+  dfInputDistinct
+    .join(dfAtomicTableGroupBy,
+          Seq("Load_Info_Sk"),
+          "left_outer")
+  
+}
