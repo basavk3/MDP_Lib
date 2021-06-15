@@ -1,0 +1,17 @@
+// Databricks notebook source
+// To get Current DateTime
+import java.time.format.DateTimeFormatter
+import java.time.LocalDateTime
+val LoadStartDatetime = DateTimeFormatter.ofPattern("yyy-MM-dd HH:mm:ss").format(LocalDateTime.now)
+
+// COMMAND ----------
+
+// MAGIC %run /MDP/010_KeyVault_Authorization
+
+// COMMAND ----------
+
+// MAGIC %run /MDP/020_DefineConstants
+
+// COMMAND ----------
+
+// MAGIC %run /MDP/030_DefineFunctions
