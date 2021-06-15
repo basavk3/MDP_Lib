@@ -1,0 +1,1407 @@
+// Databricks notebook source
+import org.apache.spark.sql.Column
+//test
+// import org.apache.spark.sql.functions //.{expr, col, column}
+import spark.sqlContext.implicits._
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql.DataFrame
+import org.apache.spark.sql.SparkSession
+import scala.util.{Try, Success, Failure}
+import io.delta.tables._
+import spark.implicits._
+import org.apache.spark.sql.types._
+import java.text.SimpleDateFormat
+import java.util.Date
+
+// COMMAND ----------
+
+// ********************************************
+// Root Folders
+// ********************************************
+val appName = "MDPETL"
+val RawMountPointPath = "/mnt/raw/"
+val baseMountPointPath = "/mnt/integration/base/"
+val atomicMountPointPath = "/mnt/integration/atomic/"
+val operationalPointPath = "/mnt/operational/"
+
+val loadInfoAudtPath = atomicMountPointPath + "Load_Info_Audt"
+
+// ********************************************
+// End of Root Folders 
+// ********************************************
+
+
+// ********************************************
+// Root Folders for Pharmacy 
+// ********************************************
+val pharmacyRawMountPointPath  = "/mnt/raw/Pharmacy/"
+val pharmacyBaseMountPointPath= "/mnt/integration/base/Pharmacy/"
+val pharmacyCleansedMountPointPath = "/mnt/integration/cleansed/Pharmacy/"
+val pharmacyConsumptionMountPointPath = "/mnt/consumption/Pharmacy/"
+
+
+
+
+
+// *********************************************
+// Pharmacy Raw Sub Folders 
+//**********************************************
+
+val cnstRawCSProvidersMountPointPath = pharmacyRawMountPointPath + "CareSourceProviders/"
+val cnstRawBridgeTableMountPointPath = pharmacyRawMountPointPath + "PriorAuthBridge/"
+val cnstRawTherapClassMountPointPath = pharmacyRawMountPointPath + "AHFSTherapClass/"
+val cnstRawPZ400ClassMountPointPath  = pharmacyRawMountPointPath + "PZ400/Stage/"
+val cnstRawNCPDPClassMountPointPath  = pharmacyRawMountPointPath + "NCPDP/Archive/"
+val cnstTempConfigMountPointPath = pharmacyRawMountPointPath+"tempConfigs/"
+val cnstRawMedispanMountPointPath = pharmacyRawMountPointPath + "Medispan/"
+
+//**********************************************
+// End of Raw Sub Folders
+// *********************************************
+
+
+// *********************************************
+// Pharmacy cleansed Sub Folders 
+//**********************************************
+// use MountPointPathName if finalized plan is to go with mount points.
+val MountPointPathName = pharmacyCleansedMountPointPath
+//**********************************************
+// End of cleansed Sub Folders
+// *********************************************
+
+
+// **************************************
+// etlMetadata Mount Point Path
+// **************************************
+
+val etlMetadataPath = operationalPointPath + "ETLMetadata"
+
+// **************************************
+// End etlMetadata Mount Point Path
+// **************************************
+
+
+// **************************************
+// synapse temp directory location
+// **************************************
+
+val synapsetempFolderName="SynapseLocal"
+val synapseContainer = "consumption"
+val synapseTempdir = s"abfss://$synapseContainer@$storage_account.dfs.core.windows.net/$synapsetempFolderName"
+
+// **************************************
+// End of synapse temp directory location
+// **************************************
+
+
+// Note: Not sure if we need these in the Constants file
+// **************************************
+// Input Out Paths for the File Updload
+// **************************************
+val cnstinput_path = pharmacyRawMountPointPath
+val cnstoutput_path = pharmacyBaseMountPointPath
+// ********************************************
+// End of Input Out Paths for the File Updload
+// ********************************************
+
+
+// COMMAND ----------
+
+//mas_af file : Relationship Demographic Information
+//val InputPath = "/mnt/databricks/Input/DeIdentifiedData/PilotUseCases/Pharmacy/"
+
+val SizeOfColumns_mas_af = List(3,2,35,55,55,30,2,9,10,5,10,10,15,30,30,50,30,30,50,30,30,50,30,30,50,30,30,50,6,8,8,187)
+val Schema_mas_af = new StructType()
+.add("RelationshipID",StringType,true)
+.add("RelationshipType",StringType,true)
+.add("Name",StringType,true)
+.add("Address1",StringType,true)
+.add("Address2",StringType,true)
+.add("City",StringType,true)
+.add("StateCode",StringType,true)
+.add("ZipCode",StringType,true)
+.add("PhoneNumber",StringType,true)
+.add("Extension", StringType, true)
+.add("FaxNumber", StringType, true)
+.add("RelationshipNPI", StringType, true)
+.add("RelationshipFederalTaxID", StringType, true)
+.add("ContactName", StringType, true)
+.add("ContactTitle", StringType, true)
+.add("EmailAddress", StringType, true)
+.add("ContractualContactName", StringType, true)
+.add("ContractualContactTitle", StringType, true)
+.add("ContractualContactEmail", StringType, true)
+.add("OperationalContactName", StringType, true)
+.add("OperationalContactTitle", StringType, true)
+.add("OperationalContactEmail", StringType, true)
+.add("TechnicalContactName", StringType, true)
+.add("TechnicalContactTitle", StringType, true)
+.add("TechnicalContactEmail", StringType, true)
+.add("AuditContactName", StringType, true)
+.add("AuditContactTitle", StringType, true)
+.add("AuditContactEmail", StringType, true)
+.add("ParentOrganizationID", StringType, true)
+.add("EffectiveFromDate", StringType, true)
+.add("DeleteDate", StringType, true)
+.add("Fillter", StringType, true)
+
+//mas file : Provider Information
+val SizeOfColumns_mas = List(7,60,60,60,10,55,55,30,2,9,10,5,10,50,50,5,4,4,1,35,4,2,2,2,2,2,8,8,55,55,30,2,9,20,20,1,30,10,5,50,2,2,2,2,10,10,12,8,15,15,2,2,8,1,8,62)
+val Schema_mas = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("LegalBusinessName",StringType,true)
+.add("Name",StringType,true)
+.add("DoctorName",StringType,true)
+.add("StoreNumber",StringType,true)
+.add("PhysicalLocationAddress1",StringType,true)
+.add("PhysicalLocationAddress2",StringType,true)
+.add("PhysicalLocationCity",StringType,true)
+.add("PhysicalLocationStateCode", StringType, true)
+.add("PhysicalLocationZipCode", StringType, true)
+.add("PhysicalLocationPhoneNumber", StringType, true)
+.add("PhysicalLocationExtension", StringType, true)
+.add("PhysicalLocationFAX", StringType, true)
+.add("PhysicalLocationEmail", StringType, true)
+.add("PhysicalLocationDirections", StringType, true)
+.add("PhysicalLocationCounty", StringType, true)
+.add("PhysicalLocationMSA", StringType, true)
+.add("PhysicalLocationPMSA", StringType, true)
+.add("PhysicalLocation24HourOperationFlag", StringType, true)
+.add("PhysicalLocationProviderHours", StringType, true)
+.add("PhysicalLocationCongressionalVotingDistrict", StringType, true)
+.add("PhysicalLocationLanguageCode1", StringType, true)
+.add("PhysicalLocationLanguageCode2", StringType, true)
+.add("PhysicalLocationLanguageCode3", StringType, true)
+.add("PhysicalLocationLanguageCode4", StringType, true)
+.add("PhysicalLocationLanguageCode5", StringType, true)
+.add("PhysicalLocationStoreOpenDate", StringType, true)
+.add("PhysicalLocationStoreClosureDate", StringType, true)
+.add("MailingAddress1", StringType, true)
+.add("MailingAddress2", StringType, true)
+.add("MailingAddressCity", StringType, true)
+.add("MailingAddressStateCode", StringType, true)
+.add("MailingAddressZipCode", StringType, true)
+.add("ContactLastName", StringType, true)
+.add("ContactFirstName", StringType, true)
+.add("ContactMiddleInitial", StringType, true)
+.add("ContactTitle", StringType, true)
+.add("ContactPhoneNumber", StringType, true)
+.add("ContactExtension", StringType, true)
+.add("ContactEmailAddress", StringType, true)
+.add("DispenserClassCode", StringType, true)
+.add("PrimaryProviderTypeCode", StringType, true)
+.add("SecondaryProviderTypeCode", StringType, true)
+.add("TertiaryProviderTypeCode", StringType, true)
+.add("MedicalProviderID", StringType, true)
+.add("NationalProviderID", StringType, true)
+.add("DEARegistrationID", StringType, true)
+.add("DEAExpirationDate", StringType, true)
+.add("FederalTaxIDNumber", StringType, true)
+.add("StateIncomeTaxIDNumber", StringType, true)
+.add("DeactivationCode", StringType, true)
+.add("ReinstatementCode", StringType, true)
+.add("ReinstatementDate", StringType, true)
+.add("TransactionCode", StringType, true)
+.add("TransactionDate", StringType, true)
+.add("Filler", StringType, true)
+
+//mas_svc file : Services Offered Information
+
+val SizeOfColumns_mas_svc = List(7,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2,107)
+val Schema_mas_svc = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("AcceptsEprescriptionsIndicator",StringType,true)
+.add("AcceptsEprescriptionsCode",StringType,true)
+.add("DeliveryServiceIndicator",StringType,true)
+.add("DeliveryServiceCode",StringType,true)
+.add("CompoundingServiceIndicator",StringType,true)
+.add("CompoundingServiceCode",StringType,true)
+.add("DriveupWindowIndicator",StringType,true)
+.add("DriveupWindowCode", StringType, true)
+.add("DurableMedicalEquipmentIndicator", StringType, true)
+.add("DurableMedicalEquipmentCode", StringType, true)
+.add("WalkinClinicIndicator", StringType, true)
+.add("WalkinClinicCode", StringType, true)
+.add("24HourEmergencyServiceIndicator", StringType, true)
+.add("24HourEmergencyServiceCode", StringType, true)
+.add("MultiDoseCompliancePackagingIndicator", StringType, true)
+.add("MultiDoseCompliancePackagingCode", StringType, true)
+.add("ImmunizationsProvidedIndicator", StringType, true)
+.add("ImmunizationsProvidedCode", StringType, true)
+.add("HandicappedAccessibleIndicator", StringType, true)
+.add("HandicappedAccessibleCode", StringType, true)
+.add("340BStatusIndicator", StringType, true)
+.add("340BStatusCode", StringType, true)
+.add("ClosedDoorFacilityIndicator", StringType, true)
+.add("ClosedDoorFacilityStatusCode", StringType, true)
+.add("Filler", StringType, true)
+
+//mas_rr file : Provider Relationship Information
+val SizeOfColumns_mas_rr = List(7,3,6,6,2,1,8,8,109)
+val Schema_mas_rr = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("RelationshipID",StringType,true)
+.add("PaymentCenterID",StringType,true)
+.add("RemitAndReconciliationID",StringType,true)
+.add("ProviderType",StringType,true)
+.add("IsPrimary",StringType,true)
+.add("EffectiveFromDate",StringType,true)
+.add("EffectiveThroughDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_coo file : Change of Ownership Information
+val SizeOfColumns_mas_coo = List(7,7,8,8,120)
+val Schema_mas_coo = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("OldNcpdpProviderID",StringType,true)
+.add("OldStoreCloseDate",StringType,true)
+.add("ChangeOfOwnershipEffectiveDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_erx file : ePrescribing Information
+val SizeOfColumns_mas_erx = List(7,3,100,8,8,24)
+val Schema_mas_erx = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("EprescribingNetworkIdentifier",StringType,true)
+.add("EprescribingServiceLevelCodes",StringType,true)
+.add("EffectiveFromDate",StringType,true)
+.add("EffectiveThroughDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_fwa file : Fraud Waste and Abuse Training Attestation
+val SizeOfColumns_mas_fwa = List(7,1,1,5,4,1,1,8,60,1,1,60,8,60,60,55,55,30,2,9,10,10,50,5)
+val Schema_mas_fwa = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("MedicalPartD",StringType,true)
+.add("FwaAttestation",StringType,true)
+.add("VersionNumber",StringType,true)
+.add("PlanYear",StringType,true)
+.add("Q1",StringType,true)
+.add("Q2",StringType,true)
+.add("AccreditationDate",StringType,true)
+.add("AccreditationOrganization", StringType, true)
+.add("Q3", StringType, true)
+.add("Q4", StringType, true)
+.add("SignatureOfResponsibleParty", StringType, true)
+.add("SignatureDate", StringType, true)
+.add("ResponsibleParty", StringType, true)
+.add("ParticipatingPharmacyOrPSAOName", StringType, true)
+.add("Address1", StringType, true)
+.add("Address2", StringType, true)
+.add("City", StringType, true)
+.add("StateCode", StringType, true)
+.add("ZipCode", StringType, true)
+.add("Npi", StringType, true)
+.add("Fax", StringType, true)
+.add("Email", StringType, true)
+.add("Filler", StringType, true)
+
+//mas_md file : Medicaid Information
+val SizeOfColumns_mas_md = List(7,2,20,8,113)
+val Schema_mas_md = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("StateCode",StringType,true)
+.add("MedicaidID",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_pc file : Payment Center Information
+val SizeOfColumns_mas_pc = List(6,35,55,55,30,2,9,10,5,10,10,15,30,30,50,8,140)
+val Schema_mas_pc = new StructType()
+.add("PaymentCenterID",StringType,true)
+.add("PaymentCenterName",StringType,true)
+.add("PaymentCenterAddress1",StringType,true)
+.add("PaymentCenterAddress2",StringType,true)
+.add("PaymentCenterCity",StringType,true)
+.add("PaymentCenterStateCode",StringType,true)
+.add("PaymentCenterZipCode",StringType,true)
+.add("PaymentCenterPhoneNumber",StringType,true)
+.add("PaymentCenterExtension",StringType,true)
+.add("PaymentCenterFaxNumber",StringType,true)
+.add("PaymentCenterNPI",StringType,true)
+.add("PaymentCenterFederalTaxID",StringType,true)
+.add("PaymentCenterContactName",StringType,true)
+.add("PaymentCenterContactTitle",StringType,true)
+.add("PaymentCenterEmailAddress",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_pr file : Parent Organization Information
+val SizeOfColumns_mas_pr = List(6,35,55,55,30,2,9,10,5,10,10,15,30,30,50,8,140)
+val Schema_mas_pr = new StructType()
+.add("ParentOrganizationID",StringType,true)
+.add("ParentOrganizationName",StringType,true)
+.add("Address1",StringType,true)
+.add("Address2",StringType,true)
+.add("City",StringType,true)
+.add("StateCode",StringType,true)
+.add("ZipCode",StringType,true)
+.add("PhoneNumber",StringType,true)
+.add("Extension",StringType,true)
+.add("FaxNumber",StringType,true)
+.add("ParentOrganizationNPI",StringType,true)
+.add("ParentOrganizationFederalTaxID",StringType,true)
+.add("ContactName",StringType,true)
+.add("ContactTitle",StringType,true)
+.add("EmailAddress",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_rec file : Remit And Reconciliation Information
+val SizeOfColumns_mas_rec = List(6,35,55,55,30,2,9,10,5,10,10,15,30,30,50,8,140)
+val Schema_mas_rec = new StructType()
+.add("RemitAndReconciliationID",StringType,true)
+.add("RemitAndReconciliationName",StringType,true)
+.add("RemitAndReconciliationAddress1",StringType,true)
+.add("RemitAndReconciliationAddress2",StringType,true)
+.add("RemitAndReconciliationCity",StringType,true)
+.add("RemitAndReconciliationStateCode",StringType,true)
+.add("RemitAndReconciliationZipCode",StringType,true)
+.add("RemitAndReconciliationPhoneNumber",StringType,true)
+.add("RemitAndReconciliationExtension",StringType,true)
+.add("RemitAndReconciliationFaxNumber",StringType,true)
+.add("RemitAndReconciliationNPI",StringType,true)
+.add("RemitAndReconciliationFederalTaxID",StringType,true)
+.add("RemitAndReconciliationContactName",StringType,true)
+.add("RemitAndReconciliationContactTitle",StringType,true)
+.add("RemitAndReconciliationEmailAddress",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_stl file : State License Information
+val SizeOfColumns_mas_stl = List(7,2,20,8,8,105)
+val Schema_mas_stl = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("LicenseStateCode",StringType,true)
+.add("StateLicenseNumber",StringType,true)
+.add("StateLicenseExpirationDate",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+//mas_tx file : Taxonomy Information
+val SizeOfColumns_mas_tx = List(7,10,2,8,123)
+val Schema_mas_tx = new StructType()
+.add("NcpdpProviderID",StringType,true)
+.add("TaxonomyCode",StringType,true)
+.add("ProviderTypeCode",StringType,true)
+.add("DeleteDate",StringType,true)
+.add("Filler", StringType, true)
+
+
+//Newly added code for Medispan HCP
+//hcpdict file : Medispan HCP ( HCPDICT) Information
+val SizeOfColumns_hcpdict = List(4,35,1,3,1,2,1,1,16)
+val Schema_hcpdict = new StructType()
+.add("FIELDIDENTIFIER",StringType,true)
+.add("FIELDDESCRIPTION",StringType,true)
+.add("FIELDTYPE",StringType,true)
+.add("FIELDLENGTH",StringType,true)
+.add("IMPLIEDDECIMALFLAG",StringType,true)
+.add("DECIMALPLACES",StringType,true)
+.add("FIELDVALIDATIONFLAG",StringType,true)
+.add("FIELDABBREVIATIONFLAG",StringType,true)
+.add("RESERVE",StringType,true)
+
+
+//hcpsum file : Medispan HCP ( HCPSUM) Information
+//schema details
+val SizeOfColumns_hcpsum = List(3,1,3,1,1,87)
+val Schema_hcpsum = new StructType()
+.add("RecordType",StringType,true)
+.add("Reserve1",StringType,true)
+.add("SequenceNumber",StringType,true)
+.add("Reserve2",StringType,true)
+.add("CommentMarker",StringType,true)
+.add("DataorComment",StringType,true)
+
+
+//hcpval file : Medispan HCP ( HCPVAL) Information
+val SizeOfColumns_hcpval = List(4,15,2,40,15,20)
+val Schema_hcpval = new StructType()
+.add("FIELDIDENTIFIER",StringType,true)
+.add("FIELDVALUES",StringType,true)
+.add("LANGUAGECODE",StringType,true)
+.add("VALUEDESCRIPTION",StringType,true)
+.add("VALUEABBREVIATION",StringType,true)
+.add("RESERVE",StringType,true)
+
+
+//hcpndc file : Medispan HCP ( HCPNDC) Information
+val SizeOfColumns_hcpndc = List(20,1,1,10,1,2,13)
+val Schema_hcpndc = new StructType()
+.add("EXTERNALDRUGID",StringType,true)
+.add("FORMATCODE",StringType,true)
+.add("TYPECODE",StringType,true)
+.add("HCPCSCODE",StringType,true)
+.add("TRANSACTIONCODE",StringType,true)
+.add("MAPPINGINDICATOR",StringType,true)
+.add("RESERVE",StringType,true)
+
+
+// COMMAND ----------
+
+// DBTITLE 1,Medispan M25 Schema and positions
+//M25_A1==============================
+//removed last but one '1'
+val SizeOfColumns_m25_A1 = List(11,1,3,1,7,5,1,9,5,6,1,1,2,13,1,1,1,1,1,2,1,1,1,1,1,10,1,1,1,1,1,1,1,5)
+val Schema_m25_A1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("SequenceCode",StringType,true)
+.add("LabelerCode",StringType,true)
+.add("GenericIDTypeCode",StringType,true)
+.add("GenericIDNumber",StringType,true)
+.add("DEAClassCode",StringType,true)
+.add("AHFSTherapeuticClassCode",StringType,true)
+.add("ItemStatusFlag",StringType,true)
+.add("LocalSystemicFlag",StringType,true)
+.add("TEECode",StringType,true)
+.add("FormattedIDNumber",StringType,true)
+.add("RXOTCIndicatorCode",StringType,true)
+.add("ThirdPartyRestrictionCode",StringType,true)
+.add("MaintenanceDrugCode", StringType, true)
+.add("DispensingUnitCode",StringType,true)
+.add("UnitDoseUnitofUsePackageCode",StringType,true)
+.add("RouteofAdministration",StringType,true)
+.add("FormTypeCode",StringType,true)
+.add("DollarRankCode", StringType, true)
+.add("RxRankCode", StringType, true)
+.add("NumberSystemCharacter",StringType,true)
+.add("SecondaryFormatIDCode",StringType,true)
+.add("SecondaryIDNumber",StringType,true)
+.add("MultiSourceCode",StringType,true)
+.add("BrandNameCode", StringType, true)
+.add("Reserve", StringType, true)
+.add("InternalExternalCode", StringType, true)
+.add("SingleCombinationCode", StringType, true)
+.add("StorageConditionCode", StringType, true)
+.add("LimitedStabilityCode", StringType, true)
+.add("LastChangeDate", StringType, true)
+
+
+
+//M25_C1=====================================
+val SizeOfColumns_m25_C1 = List(11,1,3,1,11,1,13,5,11,1,13,5,19,5)
+val Schema_m25_C1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("OldNDCUPCHRI",StringType,true)
+.add("Reserve1",StringType,true)
+.add("OldFormattedIDNumber",StringType,true)
+.add("OldEffDate",StringType,true)
+.add("NewNDCUPCHRI",StringType,true)
+.add("Reserve2",StringType,true)
+.add("NewFormattedIDNumber",StringType,true)
+.add("NewEffDate",StringType,true)
+.add("Reserve3",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+
+
+//M25_E1==============================================================
+val SizeOfColumns_m25_E1 = List(11,1,3,1,25,35,8,4,2,1,1,1,1,1,5)
+val Schema_m25_E1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("ProductName",StringType,true)
+.add("ProductNameExtension",StringType,true)
+.add("Reserve1",StringType,true)
+.add("AllergyPatternCode",StringType,true)
+.add("Reserve2",StringType,true)
+.add("PPGIndicatorCode",StringType,true)
+.add("HFPGIndicatorCode",StringType,true)
+.add("LabelertypeCode",StringType,true)
+.add("PricingSpreadCode",StringType,true)
+.add("Reserve3",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+
+//M25_G1================================================================
+val SizeOfColumns_m25_G1 = List(11,1,3,1,14,5,60,5)
+val Schema_m25_G1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("GenericProductIdentifier",StringType,true)
+.add("Reserve",StringType,true)
+.add("GPIGenericName",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+
+//M25_J1================================================================
+val SizeOfColumns_m25_J1 = List(11,1,3,1,30,10,25,6,8,5)
+val Schema_m25_J1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("ManufacturersLabelerName",StringType,true)
+.add("ManufacturerAbbreviatedName",StringType,true)
+.add("ProductDescriptionAbbreviation",StringType,true)
+.add("DrugNameCode",StringType,true)
+.add("GenericProductPackagingCode",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+
+//M25_L1================================================================
+val SizeOfColumns_m25_L1 = List(11,1,3,1,23,4,8,2,5,1,12,1,10,6,2,2,1,1,1,5)
+val Schema_m25_L1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("Reserve1",StringType,true)
+.add("DosageForm",StringType,true)
+.add("PackageSize",StringType,true)
+.add("PackageSizeUnitofMeasure",StringType,true)
+.add("PackageQuantity",StringType,true)
+.add("RepackageCode",StringType,true)
+.add("TotalPackageQuantity",StringType,true)
+.add("DESICode",StringType,true)
+.add("PackageDescription",StringType,true)
+.add("Reserve2",StringType,true)
+.add("NextSmallerNDCSuffixNumber",StringType,true)
+.add("NextLargerNDCSuffixNumber",StringType,true)
+.add("InnerpackCode", StringType, true)
+.add("ClinicPackCode",StringType,true)
+.add("Reserve3",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25_M1================================================================
+val SizeOfColumns_m25_M1 = List(11,1,3,1,13,11,2,8,8,37,5)
+val Schema_m25_M1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("MetricStrength",StringType,true)
+.add("StrengthUnitofMeasure",StringType,true)
+.add("LimitedDistributionCode",StringType,true)
+.add("ExtendedAHFSTherapeuticClassCode",StringType,true)
+.add("InactiveDate",StringType,true)
+.add("Reserve",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25_P================================================================
+
+val SizeOfColumns_m25_P = List(11,1,3,1,1,9,13,11,40,1,4,5)
+val Schema_m25_P = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("IngredientGenericIDTypeCode",StringType,true)
+.add("IngredientGenericIDNumber",StringType,true)
+.add("IngredientStrength",StringType,true)
+.add("IngredientStrengthUnitofMeasure",StringType,true)
+.add("GenericIngredientName",StringType,true)
+.add("ActiveInactiveIngredientFlag",StringType,true)
+.add("Reserve",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25_Q================================================================
+
+val SizeOfColumns_m25_Q = List(11,1,3,1,1,10,13,8,10,13,8,16,5)
+val Schema_m25_Q = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("Reserve",StringType,true)
+.add("WACPackagePrice",StringType,true)
+.add("WACUnitPrice",StringType,true)
+.add("EffectiveDate",StringType,true)
+.add("OlderWACPackagePrice",StringType,true)
+.add("OlderWACUnitPrice",StringType,true)
+.add("OlderWACEffectiveDate",StringType,true)
+.add("Reserve1",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25_R==============================================================================
+val SizeOfColumns_m25_R = List(11,1,3,1,1,10,13,8,10,13,8,16,5)
+val Schema_m25_R = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("AWPIndicatorCode",StringType,true)
+.add("AWPPackagePrice",StringType,true)
+.add("AWPUnitPrice",StringType,true)
+.add("EffectiveDate",StringType,true)
+.add("OlderAWPPackagePrice",StringType,true)
+.add("OlderAWPUnitPrivce",StringType,true)
+.add("OlderAWPEffectiveDate",StringType,true)
+.add("Reserve",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25_S================================================================
+val SizeOfColumns_m25_S = List(11,1,3,1,1,10,13,8,10,13,8,16,5)
+val Schema_m25_S = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("Reserve1",StringType,true)
+.add("DPPackagePrice",StringType,true)
+.add("DPUnitPrice",StringType,true)
+.add("EffectiveDate",StringType,true)
+.add("OlderDPPackagePrice",StringType,true)
+.add("OlderDPUnitPrice",StringType,true)
+.add("OlderDPEffectiveDate",StringType,true)
+.add("Reserve2",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+//M25_T1================================================================
+
+val SizeOfColumns_m25_T1 = List(11,1,3,1,1,13,8,13,8,13,8,15,5)
+val Schema_m25_T1 = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("Reserve1",StringType,true)
+.add("CMSFULPrice",StringType,true)
+.add("CMSFULPriceEffectiveDate",StringType,true)
+.add("1stOldestCMSFULPrice",StringType,true)
+.add("1stOldestCMSFULPriceEffectiveDate",StringType,true)
+.add("2ndOldestCMSFULPrice",StringType,true)
+.add("2ndOldestCMSFULPriceEffectiveDate",StringType,true)
+.add("Reserve2",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+//M25TCRF================================================================
+val SizeOfColumns_m25TCRF = List(10,4,1,60,19,1,5)
+val Schema_m25TCRF = new StructType()
+.add("TherapeuticClassificationCode",StringType,true)
+.add("Reserve1",StringType,true)
+.add("RecordTypeCode",StringType,true)
+.add("TCGPIName",StringType,true)
+.add("Reserve2",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("LastChangeDate",StringType,true)
+
+
+
+//M25ERR================================================================
+//removed extra fixed positions and added column dataelementlength
+val SizeOfColumns_m25ERR = List(11,1,3,5,4,3,5)
+val Schema_m25ERR = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("IDNumberFormatCode",StringType,true)
+.add("RecordCode",StringType,true)
+.add("Reserve1",StringType,true)
+.add("DataElementCode",StringType,true)
+.add("DataElementlength",StringType,true)
+.add("Reserve2",StringType,true)
+
+//M25MOD==========================================================================
+val SizeOfColumns_m25MOD = List(6,25,1,8,24)
+val Schema_m25MOD = new StructType()
+.add("ModifierCode",StringType,true)
+.add("ModifierDescription",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("LastChangeDate",StringType,true)
+.add("Reserve",StringType,true)
+
+//M25NMOD================================================================
+
+val SizeOfColumns_m25NMOD = List(11,1,6,1,8,5)
+val Schema_m25NMOD = new StructType()
+.add("NDCUPCHRI",StringType,true)
+.add("Reserve1",StringType,true)
+.add("ModifierCode",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("LastChangeDate",StringType,true)
+.add("Reserve2",StringType,true)
+
+
+//M25GCCP================================================================
+
+val SizeOfColumns_m25GPPC = List(8,8,2,5,1,2,14,1,8,15)
+val Schema_m25GPPC = new StructType()
+.add("GenericProductPackagingCode",StringType,true)
+.add("PackageSize",StringType,true)
+.add("PackageSizeUnitofMeasure",StringType,true)
+.add("PackageQuantity",StringType,true)
+.add("UnitDoseUnitofUsePackageCode",StringType,true)
+.add("PackageDescriptionCode",StringType,true)
+.add("GenericProductIdentifier",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("LastChangeDate",StringType,true)
+.add("Reserve",StringType,true)
+
+//M25GPRR================================================================
+
+val SizeOfColumns_m25GPRR = List(8,1,13,8,1,5)
+val Schema_m25GPRR = new StructType()
+.add("GenericProductPackagingCode",StringType,true)
+.add("GPPCPriceCode",StringType,true)
+.add("GPPCUnitPrice",StringType,true)
+.add("GPPCEffDate",StringType,true)
+.add("TransactionCode",StringType,true)
+.add("Reserve",StringType,true)
+
+
+//M25SUM=================================================================
+val SizeOfColumns_m25SUM = List(3,1,3,1,1,87)
+val Schema_m25SUM = new StructType()
+.add("RecordType",StringType,true)
+.add("Reserve1",StringType,true)
+.add("SequenceNumber",StringType,true)
+.add("Reserve2",StringType,true)
+.add("CommentMarker",StringType,true)
+.add("DateorComment",StringType,true)
+
+
+//M25SUM=================================================================
+val SizeOfColumns_m25VAL = List(4,15,2,40,15,20)
+val Schema_m25VAL = new StructType()
+.add("FieldIdentifier",StringType,true)
+.add("FieldValue",StringType,true)
+.add("LanguageCode",StringType,true)
+.add("ValueDescription",StringType,true)
+.add("ValueAbbreviation",StringType,true)
+.add("Reserve",StringType,true)
+
+//M25DICT=================================================================
+val SizeOfColumns_m25DICT = List(4,35,1,3,1,2,1,1,16)
+val Schema_m25DICT = new StructType()
+.add("FieldIdentifier",StringType,true)
+.add("FieldDescription",StringType,true)
+.add("FieldType",StringType,true)
+.add("FieldLength",StringType,true)
+.add("ImpliedDecimalFlag",StringType,true)
+.add("DecimalPlaces",StringType,true)
+.add("FieldValidationFlag",StringType,true)
+.add("FieldAbbreviationFlag",StringType,true)
+.add("Reserve",StringType,true)
+
+// COMMAND ----------
+
+// DBTITLE 1,ESI Claims Schemas
+//****** Header Record Schema and Positions ****** 
+
+val SizeOfColumns_ESIHDR = List(2,2,24,7,8,4,24,8,8,1,1,2,3609)
+val Schema_ESIHDR = new StructType()
+.add("RECORDTYPE",StringType,true)
+.add("VERSIONRELEASENUMBER",StringType,true)
+.add("SENDINGENTITYIDENTIFIER",StringType,true)
+.add("BATCHNUMBER",StringType,true)
+.add("CREATIONDATE",StringType,true)
+.add("CREATIONTIME",StringType,true)
+.add("RECEIVERID",StringType,true)
+.add("REPORTINGPERIODSTARTDATE",StringType,true)
+.add("REPORTINGPERIODENDDATE",StringType,true)
+.add("FILETYPE",StringType,true)
+.add("TRANSMISSIONACTION",StringType,true)
+.add("SUBMISSIONNUMBER",StringType,true)
+.add("FILLER",StringType,true)
+
+
+//****** Trailer Schema and Positions ****** 
+val SizeOfColumns_ESITRL = List(2,10,12,12,12,3652)
+val Schema_ESITRL = new StructType()
+.add("RECORDTYPE",StringType,true)
+.add("TOTALRECORDCOUNT",StringType,true)
+.add("TOTALNETAMOUNTDUE",StringType,true)
+.add("TOTALGROSSAMOUNTDUE",StringType,true)
+.add("TOTALPATIENTPAYAMOUNT",StringType,true)
+.add("FILLER",StringType,true)
+
+//****** History Detail Record Schema and Positions ******
+val SizeOfColumns_ESIHisDR = List(2,1,3,10,10,15,6,20,20,12,5,2,181,20,35,25,1,10,55,55,30,2,15,8,1,1,1,2,20,35,25,1,10,55,55,30,2,15,8,1,2,3,3,1,1,10,15,9,15,8,1,1,1,1,1,10,1,10,2,2,4,2,15,2,15,7,35,55,55,30,2,15,3,10,1,2,1,1,1,10,2,15,2,15,10,2,35,25,10,2,15,35,25,1,1,2,1,12,2,19,8,8,6,8,5,8,2,2,2,1,8,8,15,2,8,30,12,8,10,2,3,8,1,2,1,2,2,1,10,10,3,2,1,2,2,11,2,15,2,15,2,15,2,15,2,15,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,2,19,1,3,3,3,3,3,30,8,1,30,30,15,4,6,2,1,1,1,1,1,2,2,2,1,1,17,1,17,1,17,1,3,1,17,1,17,1,17,1,17,1,1,8,15,1,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,1,2,1,8,9,9,9,9,8,9,8,8,8,8,7,2,8,8,2,8,2,8,2,8,8,2,10,2,10,8,2,8,8,8,8,8,8,8,8,2,2,2,2,2,1,8,1,1,8,8,8,1,4,11,2,8,8,8,2,11,11,2,3,1,30,8,1,1,10,8,8,8,8,8,10,8,8,8,8,8,30,20,3,2,19,2,15,9,1,1,1,14,14,1,2,1,1,1,9,3,1,2,8,2,8,2,8,2,8,8,8,20,3,2,19,2,19,2,19,2,19,2,19,2,19,2,19,2,19,2,10,2,10,2,10,2,10,2,10,2,10,2,10,2,10,2,10,2,10,1,3,3,3,3,3,8,5,3,414)
+val Schema_ESIHisDR = new StructType()
+.add("RECORDTYPE",StringType,true)
+.add("RECORDINDICATOR",StringType,true)
+.add("ELIGIBLECOVERAGECODE",StringType,true)
+.add("USERBENEFITID",StringType,true)
+.add("USERCOVERAGEID",StringType,true)
+.add("ELIGIBILITYGROUPID",StringType,true)
+.add("LINEOFBUSINESSCODE",StringType,true)
+.add("INSURANCECODE",StringType,true)
+.add("CLIENTASSIGNEDLOCATIONCODE",StringType,true)
+.add("CLIENTPASSTHROUGH1",StringType,true)
+.add("CLIENTPASSTHROUGH2",StringType,true)
+.add("CLIENTPASSTHROUGH3",StringType,true)
+.add("CLIENTPASSTHROUGH4",StringType,true)
+.add("CARDHOLDERID",StringType,true)
+.add("LASTNAME1",StringType,true)
+.add("FIRSTNAME1",StringType,true)
+.add("MIDDLEINITIAL1",StringType,true)
+.add("NAMESUFFIX",StringType,true)
+.add("ADDRESSLINE11",StringType,true)
+.add("ADDRESSLINE12",StringType,true)
+.add("CITY1",StringType,true)
+.add("STATE1",StringType,true)
+.add("ZIPPOSTALCODE1",StringType,true)
+.add("CARDHOLDERDATEOFBIRTH",StringType,true)
+.add("GENDERCODE",StringType,true)
+.add("MEDICAREPLANCODE",StringType,true)
+.add("PAYROLLCLASS",StringType,true)
+.add("PATIENTIDQUALIFIER",StringType,true)
+.add("PATIENTID",StringType,true)
+.add("LASTNAME2",StringType,true)
+.add("FIRSTNAME2",StringType,true)
+.add("MIDDLEINITIAL2",StringType,true)
+.add("NAMESUFFIX2",StringType,true)
+.add("ADDRESSLINE21",StringType,true)
+.add("ADDRESSLINE22",StringType,true)
+.add("CITY2",StringType,true)
+.add("STATE2",StringType,true)
+.add("ZIPPOSTALCODE2",StringType,true)
+.add("DATEOFBIRTH",StringType,true)
+.add("PATIENTGENDERCODE",StringType,true)
+.add("ELIGIBILITYPATIENTRELATIONSHIPCODE",StringType,true)
+.add("AGE",StringType,true)
+.add("PERSONCODE",StringType,true)
+.add("PATIENTRELATIONSHIPCODE",StringType,true)
+.add("ELIGIBILITYCLARIFICATIONCODE",StringType,true)
+.add("FACILITYID",StringType,true)
+.add("GROUPID",StringType,true)
+.add("CARRIERNUMBER",StringType,true)
+.add("BENEFITID",StringType,true)
+.add("CONTRACTNUMBER",StringType,true)
+.add("BENEFITTYPE",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMPROGRAMCODE",StringType,true)
+.add("NONPOSCLAIMOVERRIDECODE1",StringType,true)
+.add("NONPOSCLAIMOVERRIDECODE2",StringType,true)
+.add("NONPOSCLAIMOVERRIDECODE3",StringType,true)
+.add("COPAYMODIFIERID",StringType,true)
+.add("PLANCUTBACKREASONCODE",StringType,true)
+.add("PREFERREDALTERNATIVEFILEID",StringType,true)
+.add("OTHERCOVERAGECODE",StringType,true)
+.add("PLANBENEFITCODE",StringType,true)
+.add("PLANTYPE",StringType,true)
+.add("SERVICEPROVIDERIDQUALIFIER",StringType,true)
+.add("SERVICEPROVIDERID",StringType,true)
+.add("SERVICEPROVIDERIDQUALIFIERALTERNATE",StringType,true)
+.add("SERVICEPROVIDERIDALTERNATE",StringType,true)
+.add("SERVICEPROVIDERCHAINCODE",StringType,true)
+.add("PHARMACYNAME",StringType,true)
+.add("ADDRESSLINE1",StringType,true)
+.add("ADDRESSLINE2",StringType,true)
+.add("CITY",StringType,true)
+.add("STATE",StringType,true)
+.add("ZIPPOSTALCODE",StringType,true)
+.add("SERVICEPROVIDERCOUNTYCODE",StringType,true)
+.add("TELEPHONENUMBER2",StringType,true)
+.add("PHARMACYDISPENSERTYPEQUALIFIER",StringType,true)
+.add("PHARMACYDISPENSERTYPE",StringType,true)
+.add("PHARMACYCLASSCODEQUALIFIER",StringType,true)
+.add("PHARMACYCLASSCODE",StringType,true)
+.add("INNETWORKINDICATOR",StringType,true)
+.add("NETWORKREIMBURSEMENTID",StringType,true)
+.add("PRESCRIBERIDQUALIFIER",StringType,true)
+.add("PRESCRIBERID",StringType,true)
+.add("PRESCRIBERIDQUALIFIERALTERNATE",StringType,true)
+.add("PRESCRIBERIDALTERNATE",StringType,true)
+.add("PRESCRIBERTAXONOMY",StringType,true)
+.add("PRESCRIBERCERTIFICATIONSTATUS",StringType,true)
+.add("LASTNAME3",StringType,true)
+.add("FIRSTNAME3",StringType,true)
+.add("TELEPHONENUMBER3",StringType,true)
+.add("PRIMARYCAREPROVIDERIDQUALIFIER",StringType,true)
+.add("PRIMARYCAREPROVIDERID",StringType,true)
+.add("LASTNAME4",StringType,true)
+.add("FIRSTNAME4",StringType,true)
+.add("RECORDSTATUSCODE",StringType,true)
+.add("CLAIMMEDIATYPE",StringType,true)
+.add("PROCESSORPAYMENTCLARIFICATIONCODE",StringType,true)
+.add("PRESCRIPTIONSERVICEREFERENCENUMBERQUALIFIER",StringType,true)
+.add("PRESCRIPTIONSERVICEREFERENCENUMBER",StringType,true)
+.add("PRODUCTSERVICEIDQUALIFIER",StringType,true)
+.add("PRODUCTSERVICEID",StringType,true)
+.add("DATEOFSERVICE",StringType,true)
+.add("ADJUDICATIONDATE",StringType,true)
+.add("ADJUDICATIONTIME",StringType,true)
+.add("ORIGINALCLAIMRECEIVEDDATE",StringType,true)
+.add("CLAIMSEQUENCENUMBER",StringType,true)
+.add("BILLINGCYCLEENDDATE",StringType,true)
+.add("COMMUNICATIONTYPEINDICATOR",StringType,true)
+.add("PLACEOFSERVICE",StringType,true)
+.add("PATIENTRESIDENCE",StringType,true)
+.add("PRESCRIPTIONORIGINCODE",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMPAYMENTRELEASEDATE",StringType,true)
+.add("CLAIMDATERECEIVEDINTHEMAIL",StringType,true)
+.add("INTERNALMAILORDERPRESCRIPTIONSERVICEREFERENCENUMBER",StringType,true)
+.add("VERSIONRELEASENUMBEROFTHECLAIM",StringType,true)
+.add("CHECKDATE",StringType,true)
+.add("PAYMENTREFERENCEID",StringType,true)
+.add("ASSOCIATEDPRESCRIPTIONSERVICEREFERENCENUMBER",StringType,true)
+.add("ASSOCIATEDPRESCRIPTIONSERVICEDATE",StringType,true)
+.add("QUANTITYDISPENSED",StringType,true)
+.add("FILLNUMBER",StringType,true)
+.add("DAYSSUPPLY",StringType,true)
+.add("DATEPRESCRIPTIONWRITTEN",StringType,true)
+.add("DISPENSEASWRITTENDAWPRODUCTSELECTIONCODE",StringType,true)
+.add("NUMBEROFREFILLSAUTHORIZED",StringType,true)
+.add("SPECIALPACKAGINGINDICATOR",StringType,true)
+.add("UNITOFMEASURE",StringType,true)
+.add("LEVELOFSERVICE",StringType,true)
+.add("DISPENSINGSTATUS",StringType,true)
+.add("QUANTITYINTENDEDTOBEDISPENSED",StringType,true)
+.add("QUANTITYPRESCRIBED",StringType,true)
+.add("DAYSSUPPLYINTENDEDTOBEDISPENSED",StringType,true)
+.add("FILLNUMBERCALCULATED",StringType,true)
+.add("COMPOUNDCODE",StringType,true)
+.add("COMPOUNDTYPE",StringType,true)
+.add("COMPOUNDROUTEOFADMINISTRATION",StringType,true)
+.add("ROUTEOFADMINISTRATION",StringType,true)
+.add("DIAGNOSISCODEQUALIFIER1",StringType,true)
+.add("DIAGNOSISCODE1",StringType,true)
+.add("DIAGNOSISCODEQUALIFIER2",StringType,true)
+.add("DIAGNOSISCODE2",StringType,true)
+.add("DIAGNOSISCODEQUALIFIER3",StringType,true)
+.add("DIAGNOSISCODE3",StringType,true)
+.add("DIAGNOSISCODEQUALIFIER4",StringType,true)
+.add("DIAGNOSISCODE4",StringType,true)
+.add("DIAGNOSISCODEQUALIFIER5",StringType,true)
+.add("DIAGNOSISCODE5",StringType,true)
+.add("REASONFORSERVICECODE1",StringType,true)
+.add("PROFESSIONALSERVICECODE1",StringType,true)
+.add("RESULTOFSERVICECODE1",StringType,true)
+.add("DURPPSLEVELOFEFFORT1",StringType,true)
+.add("REASONFORSERVICECODE2",StringType,true)
+.add("PROFESSIONALSERVICECODE2",StringType,true)
+.add("RESULTOFSERVICECODE2",StringType,true)
+.add("DURPPSLEVELOFEFFORT2",StringType,true)
+.add("REASONFORSERVICECODE3",StringType,true)
+.add("PROFESSIONALSERVICECODE3",StringType,true)
+.add("RESULTOFSERVICECODE3",StringType,true)
+.add("DURPPSLEVELOFEFFORT3",StringType,true)
+.add("REASONFORSERVICECODE4",StringType,true)
+.add("PROFESSIONALSERVICECODE4",StringType,true)
+.add("RESULTOFSERVICECODE4",StringType,true)
+.add("DURPPSLEVELOFEFFORT4",StringType,true)
+.add("REASONFORSERVICECODE5",StringType,true)
+.add("PROFESSIONALSERVICECODE5",StringType,true)
+.add("RESULTOFSERVICECODE5",StringType,true)
+.add("DURPPSLEVELOFEFFORT5",StringType,true)
+.add("REASONFORSERVICECODE6",StringType,true)
+.add("PROFESSIONALSERVICECODE6",StringType,true)
+.add("RESULTOFSERVICECODE6",StringType,true)
+.add("DURPPSLEVELOFEFFORT6",StringType,true)
+.add("REASONFORSERVICECODE7",StringType,true)
+.add("PROFESSIONALSERVICECODE7",StringType,true)
+.add("RESULTOFSERVICECODE7",StringType,true)
+.add("DURPPSLEVELOFEFFORT7",StringType,true)
+.add("REASONFORSERVICECODE8",StringType,true)
+.add("PROFESSIONALSERVICECODE8",StringType,true)
+.add("RESULTOFSERVICECODE8",StringType,true)
+.add("DURPPSLEVELOFEFFORT8",StringType,true)
+.add("REASONFORSERVICECODE9",StringType,true)
+.add("PROFESSIONALSERVICECODE9",StringType,true)
+.add("RESULTOFSERVICECODE9",StringType,true)
+.add("DURPPSLEVELOFEFFORT9",StringType,true)
+.add("DURCOAGENTIDQUALIFIER",StringType,true)
+.add("DURCOAGENTID",StringType,true)
+.add("REJECTOVERRIDECODE",StringType,true)
+.add("REJECTCODE1",StringType,true)
+.add("REJECTCODE2",StringType,true)
+.add("REJECTCODE3",StringType,true)
+.add("REJECTCODE4",StringType,true)
+.add("REJECTCODE5",StringType,true)
+.add("CLAIMREFERENCEID",StringType,true)
+.add("DATEOFINJURY",StringType,true)
+.add("DATABASEINDICATOR",StringType,true)
+.add("PRODUCTSERVICENAME",StringType,true)
+.add("GENERICNAME",StringType,true)
+.add("PRODUCTSTRENGTH",StringType,true)
+.add("DOSAGEFORMCODE",StringType,true)
+.add("PROCEDURECODE",StringType,true)
+.add("PROCEDUREMODIFIERCODE",StringType,true)
+.add("DRUGTYPE",StringType,true)
+.add("MAINTENANCEDRUGINDICATOR",StringType,true)
+.add("DRUGCATEGORYCODE",StringType,true)
+.add("FEDERALDEASCHEDULE",StringType,true)
+.add("PRESCRIPTIONOVERTHECOUNTERINDICATOR",StringType,true)
+.add("SUBMISSIONCLARIFICATIONCODE1",StringType,true)
+.add("SUBMISSIONCLARIFICATIONCODE2",StringType,true)
+.add("SUBMISSIONCLARIFICATIONCODE3",StringType,true)
+.add("FDADRUGEFFICACYCODE",StringType,true)
+.add("PRODUCTCODEQUALIFIER1",StringType,true)
+.add("PRODUCTCODE1",StringType,true)
+.add("PRODUCTCODEQUALIFIER2",StringType,true)
+.add("PRODUCTCODE2",StringType,true)
+.add("PRODUCTCODEQUALIFIER3",StringType,true)
+.add("PRODUCTCODE3",StringType,true)
+.add("FEDERALUPPERLIMITINDICATOR",StringType,true)
+.add("PRESCRIBEDDAYSSUPPLY",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER",StringType,true)
+.add("THERAPEUTICCLASSCODE1",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER1",StringType,true)
+.add("THERAPEUTICCLASSCODE2",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER2",StringType,true)
+.add("THERAPEUTICCLASSCODE3",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER3",StringType,true)
+.add("THERAPEUTICCLASSCODE4",StringType,true)
+.add("FORMULARYSTATUS",StringType,true)
+.add("CLIENTFORMULARYFLAG",StringType,true)
+.add("THERAPEUTICCHAPTER",StringType,true)
+.add("FORMULARYFILEID",StringType,true)
+.add("FORMULARYCODETYPE",StringType,true)
+.add("INGREDIENTCOSTPAID",StringType,true)
+.add("DISPENSINGFEEPAID",StringType,true)
+.add("TOTALAMOUNTPAIDBYALLSOURCES",StringType,true)
+.add("AMOUNTATTRIBUTEDTOSALESTAX",StringType,true)
+.add("PATIENTPAYAMOUNT",StringType,true)
+.add("AMOUNTOFCOPAY",StringType,true)
+.add("AMOUNTOFCOINSURANCE",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPRODUCTSELECTION",StringType,true)
+.add("AMOUNTAPPLIEDTOPERIODICDEDUCTIBLE",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPROCESSORFEE",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPROVIDERNETWORKSELECTION",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPRODUCTSELECTIONBRANDDRUG",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPRODUCTSELECTIONNONPREFERREDFORMULARYSELECTION",StringType,true)
+.add("AMOUNTATTRIBUTEDTOPRODUCTSELECTIONBRANDNONPREFERREDFORMULARYSELECTION",StringType,true)
+.add("AMOUNTATTRIBUTEDTOCOVERAGEGAP",StringType,true)
+.add("MACREDUCEDINDICATOR",StringType,true)
+.add("CLIENTPRICINGBASISOFCOST",StringType,true)
+.add("GENERICINDICATOR",StringType,true)
+.add("OUTOFPOCKETAPPLYAMOUNT",StringType,true)
+.add("AVERAGECOSTPERQUANTITYUNITPRICE",StringType,true)
+.add("AVERAGEGENERICUNITPRICE",StringType,true)
+.add("AVERAGEWHOLESALEUNITPRICE",StringType,true)
+.add("FEDERALUPPERLIMITUNITPRICE",StringType,true)
+.add("GROSSAMOUNTDUE",StringType,true)
+.add("MACPRICE",StringType,true)
+.add("INGREDIENTCOSTSUBMITTED",StringType,true)
+.add("USUALANDCUSTOMARYCHARGE",StringType,true)
+.add("FLATSALESTAXAMOUNTPAID",StringType,true)
+.add("PERCENTAGESALESTAXAMOUNTPAID",StringType,true)
+.add("PERCENTAGESALESTAXRATEPAID",StringType,true)
+.add("PERCENTAGESALESTAXBASISPAID",StringType,true)
+.add("INCENTIVEAMOUNTPAID",StringType,true)
+.add("PROFESSIONALSERVICEFEEPAID",StringType,true)
+.add("OTHERAMOUNTPAIDQUALIFIER1",StringType,true)
+.add("OTHERAMOUNTPAID1",StringType,true)
+.add("OTHERAMOUNTPAIDQUALIFIER2",StringType,true)
+.add("OTHERAMOUNTPAID2",StringType,true)
+.add("OTHERAMOUNTPAIDQUALIFIER3",StringType,true)
+.add("OTHERAMOUNTPAID3",StringType,true)
+.add("OTHERPAYERAMOUNTRECOGNIZED",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIERneed10moretotalof12",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTneed10moretotalof12",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT",StringType,true)
+.add("NETAMOUNTDUE",StringType,true)
+.add("BASISOFREIMBURSEMENTDETERMINATION",StringType,true)
+.add("ACCUMULATEDDEDUCTIBLEAMOUNT",StringType,true)
+.add("REMAININGDEDUCTIBLEAMOUNT",StringType,true)
+.add("REMAININGBENEFITAMOUNT",StringType,true)
+.add("COSTDIFFERENCEAMOUNT",StringType,true)
+.add("EXCESSCOPAYAMOUNT",StringType,true)
+.add("MEMBERSUBMITAMOUNT",StringType,true)
+.add("HOLDHARMLESSAMOUNT",StringType,true)
+.add("AMOUNTEXCEEDINGPERIODICBENEFITMAXIMUM",StringType,true)
+.add("BASISOFCALCULATIONDISPENSINGFEE",StringType,true)
+.add("BASISOFCALCULATIONCOPAY",StringType,true)
+.add("BASISOFCALCULATIONFLATSALESTAX",StringType,true)
+.add("BASISOFCALCULATIONPERCENTAGESALESTAX",StringType,true)
+.add("BASISOFCALCULATIONCOINSURANCE",StringType,true)
+.add("TAXEXEMPTINDICATOR",StringType,true)
+.add("PATIENTFORMULARYREBATEAMOUNT",StringType,true)
+.add("MEDICARERECOVERYINDICATOR",StringType,true)
+.add("MEDICARERECOVERYDISPENSINGINDICATOR",StringType,true)
+.add("PATIENTSPENDDOWNAMOUNT",StringType,true)
+.add("HEALTHCAREREIMBURSEMENTACCOUNTAMOUNTAPPLIED",StringType,true)
+.add("HEALTHCAREREIMBURSEMENTACCOUNTAMOUNTREMAINING",StringType,true)
+.add("ADMINISTRATIVEFEEEFFECTINDICATOR",StringType,true)
+.add("ADMINISTRATIVEFEEAMOUNT",StringType,true)
+.add("INVOICEDAMOUNT",StringType,true)
+.add("BENEFITSTAGEQUALIFIER",StringType,true)
+.add("BENEFITSTAGEAMOUNT",StringType,true)
+.add("SPENDINGACCOUNTAMOUNTREMAININGSTARTHERE",StringType,true)
+.add("HEALTHPLANFUNDEDASSISTANCEAMOUNT",StringType,true)
+.add("PRIORAUTHORIZATIONTYPECODE",StringType,true)
+.add("PRIORAUTHORIZATIONNUMBERSUBMITTED",StringType,true)
+.add("PRIORAUTHORIZATIONNUMBERASSIGNED",StringType,true)
+.add("PROCESSORDEFINEDPRIORAUTHORIZATIONREASONCODE",StringType,true)
+.add("ADJUSTMENTREASONCODE",StringType,true)
+.add("ADJUSTMENTTYPE",StringType,true)
+.add("TRANSACTIONIDCROSSREFERENCE",StringType,true)
+.add("COBCARRIERSUBMITAMOUNT",StringType,true)
+.add("ELIGIBILITYCOBINDICATOR",StringType,true)
+.add("COBPRIMARYCLAIMTYPE",StringType,true)
+.add("COBPRIMARYPAYERID",StringType,true)
+.add("COBPRIMARYPAYERALLOWEDAMOUNT",StringType,true)
+.add("COBPRIMARYPAYERAMOUNTPAID",StringType,true)
+.add("COBPRIMARYPAYERDEDUCTIBLE",StringType,true)
+.add("COBPRIMARYPAYERCOINSURANCE",StringType,true)
+.add("COBPRIMARYPAYERCOPAY",StringType,true)
+.add("COBSECONDARYPAYERID",StringType,true)
+.add("COBSECONDARYPAYERALLOWEDAMOUNT",StringType,true)
+.add("COBSECONDARYPAYERAMOUNTPAID",StringType,true)
+.add("COBSECONDARYPAYERDEDUCTIBLE",StringType,true)
+.add("COBSECONDARYPAYERCOINSURANCE",StringType,true)
+.add("COBSECONDARYPAYERCOPAY",StringType,true)
+.add("TRANSACTIONID",StringType,true)
+.add("AUTHORIZATIONNUMBER",StringType,true)
+.add("CLIENTSPECIFICDATA1",StringType,true)
+.add("CLIENTSPECIFICDATA2",StringType,true)
+.add("CLIENTSPECIFICDATA3",StringType,true)
+.add("CLIENTSPECIFICDATA4",StringType,true)
+.add("CLIENTSPECIFICDATA5",StringType,true)
+.add("CLIENTSPECIFICDATA6",StringType,true)
+.add("MEMOITEMINDICATOR",StringType,true)
+.add("PRIORAUTHCOPAYOVERRIDEINDICATOR",StringType,true)
+.add("PATIENTLEVELAUTORIZATIONINDICATOR",StringType,true)
+.add("VENDORBATCHCODE",StringType,true)
+.add("VENDORBATCHCODECROSSREFERENCE",StringType,true)
+.add("ELIGIBILITYRELTAIONSHIPCODE",StringType,true)
+.add("PATIENTLOCATION",StringType,true)
+.add("REBATETYPEINDICATOR",StringType,true)
+.add("PREFERREDPHARMACYSTATUSCODE",StringType,true)
+.add("SHORTCYCLEFILLCODE",StringType,true)
+.add("MEDICAIDAGENCYID",StringType,true)
+.add("UNUSEDPROCESSORSPECIFICDATA",StringType,true)
+.add("CMSPARTDDEFINEDQUALIFIEDFACILITY",StringType,true)
+.add("BENEFITSTAGEQUALIFIER1",StringType,true)
+.add("BENEFITSTAGEAMOUNT1",StringType,true)
+.add("BENEFITSTAGEQUALIFIER2",StringType,true)
+.add("BENEFITSTAGEAMOUNT2",StringType,true)
+.add("BENEFITSTAGEQUALIFIER3",StringType,true)
+.add("BENEFITSTAGEAMOUNT3",StringType,true)
+.add("BENEFITSTAGEQUALIFIER4",StringType,true)
+.add("BENEFITSTAGEAMOUNT4",StringType,true)
+.add("INVOICEDDATE",StringType,true)
+.add("OUTOFPOCKETREMAININGAMOUNT",StringType,true)
+.add("CARDHOLDERIDAlternate",StringType,true)
+.add("NUMBEROFGENERICMANUFACTURERS",StringType,true)
+.add("DURCOAGENTIDQUALIFIER1",StringType,true)
+.add("DURCOAGENTID1",StringType,true)
+.add("DURCOAGENTIDQUALIFIER2",StringType,true)
+.add("DURCOAGENTID2",StringType,true)
+.add("DURCOAGENTIDQUALIFIER3",StringType,true)
+.add("DURCOAGENTID3",StringType,true)
+.add("DURCOAGENTIDQUALIFIER4",StringType,true)
+.add("DURCOAGENTID4",StringType,true)
+.add("DURCOAGENTIDQUALIFIER5",StringType,true)
+.add("DURCOAGENTID5",StringType,true)
+.add("DURCOAGENTIDQUALIFIER6",StringType,true)
+.add("DURCOAGENTID6",StringType,true)
+.add("DURCOAGENTIDQUALIFIER7",StringType,true)
+.add("DURCOAGENTID7",StringType,true)
+.add("DURCOAGENTIDQUALIFIER8",StringType,true)
+.add("DURCOAGENTID8",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER1",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT1",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER2",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT2",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER3",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT3",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER4",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT4",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER5",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT5",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER6",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT6",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER7",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT7",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER8",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT8",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER9",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT9",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNTQUALIFIER10",StringType,true)
+.add("OTHERPAYERPATIENTRESPONSIBILITYAMOUNT10",StringType,true)
+.add("SPECIALTYCLAIMINDICATOR",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMREJECTCODE1",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMREJECTCODE2",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMREJECTCODE3",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMREJECTCODE4",StringType,true)
+.add("MEMBERSUBMITTEDCLAIMREJECTCODE5",StringType,true)
+.add("COPAYWAIVERAMOUNT",StringType,true)
+.add("CMSPARTDCONTRACTID",StringType,true)
+.add("MEDICAREPARTDPLANBENEFITPACKAGEPBP",StringType,true)
+.add("FILLER",StringType,true)
+
+//****** Compound detail record Schema and Positions ******
+val SizeOfColumns_ESICDE = List(2,1,12,2,2,19,10,8,2,1,30,30,10,4,1,1,1,1,1,1,1,17,1,17,1,17,1,1,17,1,17,1,17,1,17,1,2,2,1,2,2,19,1,1,8,9,9,9,9,9,2,8)
+val Schema_ESICDE = new StructType()
+.add("RECORDTYPE",StringType,true)
+.add("PRESCRIPTIONSERVICEREFERENCENUMBERQUALIFIER",StringType,true)
+.add("PRESCRIPTIONSERVICEREFERENCENUMBER",StringType,true)
+.add("COMPOUNDINGREDIENTCOMPONENTCOUNT",StringType,true)
+.add("COMPOUNDPRODUCTIDQUALIFIER",StringType,true)
+.add("COMPOUNDPRODUCTID",StringType,true)
+.add("COMPOUNDINGREDIENTQUANTITY",StringType,true)
+.add("COMPOUNDINGREDIENTDRUGCOST",StringType,true)
+.add("COMPOUNDINGREDIENTBASISOFCOSTDETERMINATION",StringType,true)
+.add("CLIENTFORMULARYFLAG",StringType,true)
+.add("PRODUCTSERVICENAME",StringType,true)
+.add("GENERICNAME",StringType,true)
+.add("PRODUCTSTRENGTH",StringType,true)
+.add("DOSAGEFORMCODE",StringType,true)
+.add("DATABASEINDICATOR",StringType,true)
+.add("DRUGTYPE",StringType,true)
+.add("FORMULARYSTATUS",StringType,true)
+.add("DRUGCATEGORYCODE",StringType,true)
+.add("FEDERALDEASCHEDULE",StringType,true)
+.add("FDADRUGEFFICACYCODE",StringType,true)
+.add("PRODUCTCODEQUALIFIER1",StringType,true)
+.add("PRODUCTCODE1",StringType,true)
+.add("PRODUCTCODEQUALIFIER2",StringType,true)
+.add("PRODUCTCODE2",StringType,true)
+.add("PRODUCTCODEQUALIFIER3",StringType,true)
+.add("PRODUCTCODE3",StringType,true)
+.add("FEDERALUPPERLIMITINDICATOR",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER1",StringType,true)
+.add("THERAPEUTICCLASSCODE1",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER2",StringType,true)
+.add("THERAPEUTICCLASSCODE2",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER3",StringType,true)
+.add("THERAPEUTICCLASSCODE3",StringType,true)
+.add("THERAPEUTICCLASSCODEQUALIFIER4",StringType,true)
+.add("THERAPEUTICCLASSCODE4",StringType,true)
+.add("SPECIALPACKAGINGINDICATOR",StringType,true)
+.add("UNITOFMEASURE",StringType,true)
+.add("PROCESSORDEFINEDPRIORAUTHORIZATIONREASONCODE",StringType,true)
+.add("MACREDUCEDINDICATOR",StringType,true)
+.add("CLIENTPRICINGBASISOFCOST",StringType,true)
+.add("DURCOAGENTIDQUALIFIER",StringType,true)
+.add("DURCOAGENTID",StringType,true)
+.add("GENERICINDICATOR",StringType,true)
+.add("PLANCUTBACKREASONCODE",StringType,true)
+.add("THERAPEUTICCHAPTER",StringType,true)
+.add("AVERAGECOSTPERQUANTITYUNITPRICE",StringType,true)
+.add("AVERAGEGENERICUNITPRICE",StringType,true)
+.add("AVERAGEWHOLESALEUNITPRICE",StringType,true)
+.add("FEDERALUPPERLIMITUNITPRICE",StringType,true)
+.add("MACPRICE",StringType,true)
+.add("BASISOFREIMBURSEMENTDETERMINATION",StringType,true)
+.add("PATIENTMEDICAREFORMULARYREBATEAMOUNT",StringType,true)
+
+// COMMAND ----------
+
+// val FixWidth_Dictionary = Map(
+//                                 "mas_af" -> (Schema_mas_af, SizeOfColumns_mas_af, InputPath_mas_af),
+//                                 "mas" -> (Schema_mas, SizeOfColumns_mas, InputPath_mas),
+//                                 "mas_svc" -> (Schema_mas_svc, SizeOfColumns_mas_svc, InputPath_mas_svc),
+//                                 "mas_rr" -> (Schema_mas_rr, SizeOfColumns_mas_rr, InputPath_mas_rr),
+//                                 "mas_coo" -> (Schema_mas_coo, SizeOfColumns_mas_coo, InputPath_mas_coo),
+//                                 "mas_erx" -> (Schema_mas_erx, SizeOfColumns_mas_erx, InputPath_mas_erx),
+//                                 "mas_fwa" -> (Schema_mas_fwa, SizeOfColumns_mas_fwa, InputPath_mas_fwa),
+//                                 "mas_md" -> (Schema_mas_md, SizeOfColumns_mas_md, InputPath_mas_md),
+//                                 "mas_pc" -> (Schema_mas_pc, SizeOfColumns_mas_pc, InputPath_mas_pc),
+//                                 "mas_pr" -> (Schema_mas_pr, SizeOfColumns_mas_pr, InputPath_mas_pr),
+//                                 "mas_rec" -> (Schema_mas_rec, SizeOfColumns_mas_rec, InputPath_mas_rec),
+//                                 "mas_stl" -> (Schema_mas_stl, SizeOfColumns_mas_stl, InputPath_mas_stl),
+//                                 "mas_tx" -> (Schema_mas_tx, SizeOfColumns_mas_tx, InputPath_mas_tx)
+//                              )
+
+val FixWidth_Dictionary = Map(
+                                "mas_af.txt" -> (Schema_mas_af, SizeOfColumns_mas_af, pharmacyRawMountPointPath),
+                                "mas.txt" -> (Schema_mas, SizeOfColumns_mas, pharmacyRawMountPointPath),
+                                "mas_svc.txt" -> (Schema_mas_svc, SizeOfColumns_mas_svc, pharmacyRawMountPointPath),
+                                "mas_rr.txt" -> (Schema_mas_rr, SizeOfColumns_mas_rr, pharmacyRawMountPointPath),
+                                "mas_coo.txt" -> (Schema_mas_coo, SizeOfColumns_mas_coo, pharmacyRawMountPointPath),
+                                "mas_erx.txt" -> (Schema_mas_erx, SizeOfColumns_mas_erx, pharmacyRawMountPointPath),
+                                "mas_fwa.txt" -> (Schema_mas_fwa, SizeOfColumns_mas_fwa, pharmacyRawMountPointPath),
+                                "mas_md.txt" -> (Schema_mas_md, SizeOfColumns_mas_md, pharmacyRawMountPointPath),
+                                "mas_pc.txt" -> (Schema_mas_pc, SizeOfColumns_mas_pc, pharmacyRawMountPointPath),
+                                "mas_pr.txt" -> (Schema_mas_pr, SizeOfColumns_mas_pr, pharmacyRawMountPointPath),
+                                "mas_rec.txt" -> (Schema_mas_rec, SizeOfColumns_mas_rec, pharmacyRawMountPointPath),
+                                "mas_stl.txt" -> (Schema_mas_stl, SizeOfColumns_mas_stl, pharmacyRawMountPointPath),
+                                "mas_tx.txt" -> (Schema_mas_tx, SizeOfColumns_mas_tx, pharmacyRawMountPointPath),
+  
+								"HCPDICT" ->(Schema_hcpdict, SizeOfColumns_hcpdict, pharmacyRawMountPointPath),
+                                "HCPSUM" ->(Schema_hcpsum, SizeOfColumns_hcpsum, pharmacyRawMountPointPath),
+                                "HCPVAL" ->(Schema_hcpval, SizeOfColumns_hcpval, pharmacyRawMountPointPath),
+                                "HCPNDC" ->(Schema_hcpndc, SizeOfColumns_hcpndc, pharmacyRawMountPointPath),
+  
+  
+                                "M25_A1" -> (Schema_m25_A1, SizeOfColumns_m25_A1, pharmacyRawMountPointPath),
+                                "M25_C1" -> (Schema_m25_C1, SizeOfColumns_m25_C1, pharmacyRawMountPointPath),
+                                "M25_E1" -> (Schema_m25_E1, SizeOfColumns_m25_E1, pharmacyRawMountPointPath),
+                                "M25_G1" -> (Schema_m25_G1, SizeOfColumns_m25_G1, pharmacyRawMountPointPath),
+                                "M25_J1" -> (Schema_m25_J1, SizeOfColumns_m25_J1, pharmacyRawMountPointPath),
+                                "M25_L1" -> (Schema_m25_L1, SizeOfColumns_m25_L1, pharmacyRawMountPointPath),
+                                "M25_M1" -> (Schema_m25_M1, SizeOfColumns_m25_M1, pharmacyRawMountPointPath),
+                                "M25_P" -> (Schema_m25_P, SizeOfColumns_m25_P, pharmacyRawMountPointPath),
+                                "M25_Q" -> (Schema_m25_Q, SizeOfColumns_m25_Q, pharmacyRawMountPointPath),
+                                "M25_R" -> (Schema_m25_R, SizeOfColumns_m25_R, pharmacyRawMountPointPath),
+                                "M25_S" -> (Schema_m25_S, SizeOfColumns_m25_S, pharmacyRawMountPointPath),
+                                "M25_T1" -> (Schema_m25_T1, SizeOfColumns_m25_T1, pharmacyRawMountPointPath),
+                                "M25TCRF" -> (Schema_m25TCRF, SizeOfColumns_m25TCRF, pharmacyRawMountPointPath),
+                                "M25ERR" -> (Schema_m25ERR, SizeOfColumns_m25ERR, pharmacyRawMountPointPath),
+                                "M25MOD" -> (Schema_m25MOD, SizeOfColumns_m25MOD, pharmacyRawMountPointPath),
+                                "M25GPPC" -> (Schema_m25GPPC, SizeOfColumns_m25GPPC, pharmacyRawMountPointPath),
+                                "M25NMOD" -> (Schema_m25NMOD, SizeOfColumns_m25NMOD, pharmacyRawMountPointPath),
+                                "M25GPRR" -> (Schema_m25GPRR, SizeOfColumns_m25GPRR, pharmacyRawMountPointPath),
+                                "M25SUM" -> (Schema_m25SUM, SizeOfColumns_m25SUM, pharmacyRawMountPointPath),
+                                "M25VAL" -> (Schema_m25VAL, SizeOfColumns_m25VAL, pharmacyRawMountPointPath),
+                                "M25DICT" -> (Schema_m25DICT, SizeOfColumns_m25DICT, pharmacyRawMountPointPath),
+  
+                                "ESIHDR" -> (Schema_ESIHDR, SizeOfColumns_ESIHDR, pharmacyRawMountPointPath),
+                                "ESITRL" -> (Schema_ESITRL, SizeOfColumns_ESITRL, pharmacyRawMountPointPath),
+                                "ESICDE" -> (Schema_ESICDE, SizeOfColumns_ESICDE, pharmacyRawMountPointPath),
+                                "ESIHisDR" -> (Schema_ESIHisDR, SizeOfColumns_ESIHisDR, pharmacyRawMountPointPath)
+  
+                             )
+
+
+val FileToStageTable_Dictionary = Map(
+                                "mas_af.txt" -> ("stg_RelationshipDemographicInformation"),
+                                "mas.txt" -> ("stg_ProviderInformation"),
+                                "mas_svc.txt" -> ("stg_ServicesInformation"),
+                                "mas_rr.txt" -> ("stg_ProviderRelationshipInformation"),
+  
+                                "mas_coo.txt" -> ("stg_ChangeOfOwnershipInformation"),
+                                "mas_erx.txt" -> ("stg_ePrescribingInformation"),
+                                "mas_fwa.txt" -> ("stg_FraudWasteAndAbuseTrainingAttestation"),
+                                "mas_md.txt" -> ("stg_StateMedicaidInformation"),
+                                "mas_pc.txt" -> ("stg_PaymentCenterInformation"),
+                                "mas_pr.txt" -> ("stg_ParentOrganizationInformation"),
+                                "mas_rec.txt" -> ("stg_RemitAndReconciliationInformation"),
+                                "mas_stl.txt" -> ("stg_StateLicenseInformation"),
+                                "mas_tx.txt" -> ("stg_TaxonomyCodeInformation"),
+  
+								"HCPDICT" -> ("stg_HCPDICT"),
+                                "HCPSUM" -> ("stg_HCPSUM"),
+                                "HCPVAL" -> ("stg_HCPVAL"),
+                                "HCPNDC" -> ("stg_HCPNDC"),
+  
+                                "GAMarketplaceMTM" -> ("stg_GAMarketplaceMTM"),
+                                "GAMedicaidGAFamilyMTM" -> ("stg_GAMedicaidGAFamilyMTM"),
+                                "GAMedicaidPeachCareforKidsMTM" -> ("stg_GAMedicaidPeachCareforKidsMTM"),
+                                "INMarketplaceMTM" -> ("stg_INMarketplaceMTM"),
+								"INMedicaidHealthyIndianaPlanHIPMTM" -> ("stg_INMedicaidHealthyIndianaPlanHIPMTM"),
+								"INMediciadHoosierHealthwiseHHWMTM" -> ("stg_INMediciadHoosierHealthwiseHHWMTM"),
+								"KYMarketplaceMTM" -> ("stg_KYMarketplaceMTM"),
+								"OHDSNPMTMH6396MTM" -> ("stg_OHDSNPMTMH6396MTM"),
+								"OHMAPDMTMH6396MTM" -> ("stg_OHMAPDMTMH6396MTM"),
+								"OHMarketplaceMTM" -> ("stg_OHMarketplaceMTM"),
+								"OHMedicaidABDAdultsMTM" -> ("stg_OHMedicaidABDAdultsMTM"),
+								"OHMedicaidABDKidsMTM" -> ("stg_OHMedicaidABDKidsMTM"),
+								"OHMedicaidAFKMTM" -> ("stg_OHMedicaidAFKMTM"),
+								"OHMedicaidCFCTANFMTM" -> ("stg_OHMedicaidCFCTANFMTM"),
+								"OHMedicaidExpansionMTM" -> ("stg_OHMedicaidExpansionMTM"),
+								"OHMyCareMTMH8452MTM" -> ("stg_OHMyCareMTMH8452MTM"),
+								"WVMarketplaceMTM" -> ("stg_WVMarketplaceMTM"),
+                                "GADSNPMTMH8390NonMTM" -> ("stg_GADSNPMTMH8390NonMTM"),
+                                "GADSNPMTMH8390MTM" -> ("stg_GADSNPMTMH8390MTM"),
+  
+                                "Der" -> ("stg_MHK"),
+                                "PrscbrSumm" -> ("stg_PrscbrSumm"),
+                                "SPT" -> ("stg_SPT")
+                                
+                             )
+
+val rawHCPFilelst = List("HCPDICT","HCPSUM","HCPVAL","HCPNDC")
