@@ -1,0 +1,21 @@
+// Databricks notebook source
+// MAGIC %run /MDP/000_Master
+
+// COMMAND ----------
+
+val srcStmAtomicPath = atomicMountPointPath + "Src_Stm"
+val tenantTablePath = atomicMountPointPath + "Tenant"
+
+// COMMAND ----------
+
+val getAtomicTenantSk = spark.read.format("delta").load(tenantTablePath)
+
+// COMMAND ----------
+
+val addLoadInfoSk = generateSk(getAtomicTenantSk,loadInfoAudtPath,"Load_Info_Sk")
+
+// COMMAND ----------
+
+val dfReadSrcStm = spark.read.format("delta").load(srcStmAtomicPath)
+
+val dfFinalSks = dfReadSrcStm.join(addLoadInfoSk, Seq("Tenant_Sk"), "inner").select($"Src_Cd_Sk", $"Tenant_Sk",$"Load_Info_Sk",$"Tenant_Bk")
