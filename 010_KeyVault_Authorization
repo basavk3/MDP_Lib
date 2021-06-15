@@ -1,0 +1,67 @@
+// Databricks notebook source
+//Hide all Configs in KeyVault for a) centrelized management and b) ease for developers to not remember any secrets
+//All sensitive info such as key vault name will be in a hidden notebook along with custom functions code
+
+val scope_name = "key-mdpeastus" 
+
+val directory_id = dbutils.secrets.get(scope=scope_name, key="mdp-tenantid")  
+
+val databricks_application_id = dbutils.secrets.get(scope=scope_name, key="dbw-mdp-eastus-appid") 
+
+val databricks_dwlogin = dbutils.secrets.get(scope=scope_name, key="sqlmdpeastus-login")
+
+val databricks_dwpassword = dbutils.secrets.get(scope=scope_name, key="sqlmdpeastus-password")
+
+val databricks_secret = dbutils.secrets.get(scope=scope_name, key="dbw-mdp-eastus-secret")
+
+val storage_account = dbutils.secrets.get(scope=scope_name, key="dlstmdp-storagename")
+
+val databricks_dwServer = dbutils.secrets.get(scope=scope_name, key="sqlmdpeastus-servername")
+
+val databricks_dwDatabase = dbutils.secrets.get(scope=scope_name, key="csmdpsynapsedw-databasename")
+
+
+//Azure Synapse related settings
+val dwDatabase = databricks_dwDatabase //"<database-name>"
+val dwServer = databricks_dwServer //"<database-server-name>"
+val dwUser = databricks_dwlogin //SynapseDWUser//synapse_application_id //"csmdpdatabricksdev"//"<user-name>"
+val dwPass = databricks_dwpassword//SynapseDWPwd //synapse_secret //"<password>"
+val dwJdbcPort =  "1433"
+
+val jdbc: String = "jdbc:sqlserver://" + dwServer + ":" + dwJdbcPort + ";database=" + dwDatabase + ";user=" + dwUser + ";password=" + dwPass + ";encrypt=true;trustServerCertificate=false;hostNameInCertificate=*.database.windows.net;loginTimeout=30;"
+
+
+//Below can be used in seperate notebook dedicated for authentication.
+spark.conf.set(s"fs.azure.account.auth.type.$storage_account.dfs.core.windows.net", "OAuth")
+spark.conf.set(s"fs.azure.account.oauth.provider.type.$storage_account.dfs.core.windows.net", "org.apache.hadoop.fs.azurebfs.oauth2.ClientCredsTokenProvider")
+spark.conf.set(s"fs.azure.account.oauth2.client.id.$storage_account.dfs.core.windows.net", databricks_application_id)
+spark.conf.set(s"fs.azure.account.oauth2.client.secret.$storage_account.dfs.core.windows.net", databricks_secret)
+// spark.conf.set(s"fs.azure.account.oauth2.client.secret.$storage_account.dfs.core.windows.net", synapse_secret)
+spark.conf.set(s"fs.azure.account.oauth2.client.endpoint.$storage_account.dfs.core.windows.net", s"https://login.microsoftonline.com/$directory_id/oauth2/token")
+
+// COMMAND ----------
+
+
+// Import Spark Connector and ADAL libararies
+import com.microsoft.azure.sqldb.spark.config.Config
+import com.microsoft.azure.sqldb.spark.connect._
+import com.microsoft.azure.sqldb.spark.query._
+import org.apache.spark.sql.DataFrame
+
+
+//import ADAL for Active Directory OAuth
+import com.microsoft.aad.adal4j.ClientCredential
+import com.microsoft.aad.adal4j.AuthenticationContext
+import java.util.concurrent.Executors
+
+//Set OAuth Configuration Parameters
+val resourceAppIdURI = databricks_dwServer 
+val authority = s"https://login.windows.net/$directory_id"
+
+// Build Connection Objects
+val service = Executors.newFixedThreadPool(1)
+val context  = new AuthenticationContext(authority, true, service)
+// val ClientCred = new ClientCredential(databricks_application_id, databricks_secret)// databricks_dwlogin, databricks_dwpassword
+val ClientCred = new ClientCredential(databricks_dwlogin, databricks_dwpassword)
+val authResult = context.acquireToken(resourceAppIdURI, ClientCred, null)
+lazy val accessToken = authResult.get().getAccessToken
